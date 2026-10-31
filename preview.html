@@ -1381,9 +1381,13 @@ class PlaceholderPlayer {
     const v = this.velocity;
     if (ix || iz) this.target = null;   // keyboard always wins
     if (this.target) this._steerToTarget(dt);
-    v.x += ix * 14 * dt;
-    v.z += iz * 14 * dt;
-    v.multiplyScalar(Math.exp(-1.2 * dt)); // icy glide
+    // holding a key builds the push up smoothly: 14 (as before) → 36 m/s² over ~1.2 s
+    this._hold = (ix || iz) ? Math.min(1.2, (this._hold || 0) + dt) : 0;
+    const hk = this._hold / 1.2, build = hk * hk * (3 - 2 * hk);
+    const push = this.trick ? 14 : 14 + 22 * build;     // Triple Axel keeps its original handling
+    v.x += ix * push * dt;
+    v.z += iz * push * dt;
+    if (!this.target || this.trick) v.multiplyScalar(Math.exp(-1.2 * dt)); // icy glide (tap-steering controls its own speed)
     if (this.glideOut) {                    // post-landing coast: speed eases out smoothly to a stop
       const G = this.glideOutState;
       G.t += dt;
@@ -1393,7 +1397,8 @@ class PlaceholderPlayer {
         if (v.lengthSq() > 1e-6) v.setLength(sp);   // keep direction (slides along the boards if it meets them)
       }
     }
-    if (!this.glideOut && v.length() > 9) v.setLength(9);
+    const vmax = this.trick ? 9 : 27;      // top speed ×3 (unchanged while jumping)
+    if (!this.glideOut && v.length() > vmax) v.setLength(vmax);
 
     const p = this.mesh.position;
     p.addScaledVector(v, dt);
@@ -1431,6 +1436,7 @@ class PlaceholderPlayer {
   startTripleAxel(onEnd) {
     if (this.trick) return false;
     const v = this.velocity;
+    if (v.length() > 9) v.setLength(9);    // enter the jump at the original speed range so it plays exactly as before
     if (v.length() < 1.0) v.set(Math.sin(this.heading), 0, Math.cos(this.heading)).multiplyScalar(1.0); // gentle creep into the prep
     this.trick = { t: 0, onEnd };
     return true;
@@ -1608,6 +1614,7 @@ class PlaceholderPlayer {
   }
 
   setTarget(x, z) {
+    if (!this.target) this._acc = 1.5;     // each new trip starts with a soft push
     this.target = new THREE.Vector2(x, z);
     this._best = Infinity;
     this._stuck = 0;
@@ -1621,10 +1628,16 @@ class PlaceholderPlayer {
     // give up if blocked (e.g. by the island or the boards)
     if (dist < this._best - 0.05) { this._best = dist; this._stuck = 0; }
     else if ((this._stuck += dt) > 1.5) { this.target = null; return; }
-    const want = Math.min(6, dist * 1.4);           // ease in on arrival
-    const k = 1 - Math.exp(-dt * 2.5);
-    v.x += ((dx / dist) * want - v.x) * k;
-    v.z += ((dz / dist) * want - v.z) * k;
+    // far taps skate faster and pick up speed harder; near taps stay gentle
+    const want = Math.min(18, Math.sqrt(2 * 7 * dist) * 0.85, dist * 2.5);     // top 18 m/s (was 6), brakes in time
+    const accTarget = THREE.MathUtils.clamp(1.5 + dist * 0.6, 1.5, 16);        // m/s², grows with distance
+    this._acc = (this._acc ?? 1.5) + (accTarget - (this._acc ?? 1.5)) * (1 - Math.exp(-dt * 3)); // no sudden kick
+    const tx = (dx / dist) * want - v.x, tz = (dz / dist) * want - v.z, dl = Math.hypot(tx, tz);
+    const braking = want < Math.hypot(v.x, v.z);
+    const step = (braking ? Math.max(this._acc, 9) : this._acc) * dt;
+    const f = dl > step ? step / dl : 1;
+    v.x += tx * f;
+    v.z += tz * f;
   }
 
   _animate(dt, speed, yawRate) {
@@ -1636,7 +1649,7 @@ class PlaceholderPlayer {
     this.glide = lerp(this.glide, target, 1 - Math.exp(-dt * 4));
     const g = this.glide;
     // stroke rhythm: alternating pushes while moving, coasting when keys are released
-    this.phase += dt * (2.4 + speed * 0.22) * (pushing ? 1 : 0.35) * g;
+    this.phase += dt * (2.4 + Math.min(speed, 12) * 0.22) * (pushing ? 1 : 0.35) * g;
     const s = Math.sin(this.phase);
     const pushL = Math.max(0, s) * (pushing ? 1 : 0.35);
     const pushR = Math.max(0, -s) * (pushing ? 1 : 0.35);
@@ -1799,6 +1812,213 @@ class PointerControls {
   }
 }
 
+// ===== fx/skateFx.js =====
+// Ice dust + skate marks, driven by the skater's real blade positions.
+//  - dust: tiny twinkling sparks kicked up from each blade on the ice, more at speed
+//    (one Points draw call, fixed pool, GPU fade)
+//  - marks: thin scratch lines along the actual blade paths, held ~3 s then fade out
+//    (one Mesh draw call, fixed ring buffer of quads)
+
+class SkateFX {
+  constructor(scene, player, bounds, { dust = 260, marks = 1500 } = {}) {
+    this.player = player;
+    this.iceY = bounds.iceY;
+    this.time = 0;
+    this._v = new THREE.Vector3();
+
+    // ---- dust pool ----
+    this.dN = dust;
+    this.dPos = new Float32Array(dust * 3);
+    this.dVel = new Float32Array(dust * 3);
+    this.dLife = new Float32Array(dust);   // remaining life (s)
+    this.dMax = new Float32Array(dust);
+    this.dNext = 0;
+    const dg = new THREE.BufferGeometry();
+    dg.setAttribute('position', new THREE.BufferAttribute(this.dPos, 3));
+    dg.setAttribute('aLife', new THREE.BufferAttribute(new Float32Array(dust), 1));
+    const seed = new Float32Array(dust); for (let i = 0; i < dust; i++) seed[i] = Math.random();
+    dg.setAttribute('aSeed', new THREE.BufferAttribute(seed, 1));
+    this.dustMat = new THREE.ShaderMaterial({
+      uniforms: { uTime: { value: 0 }, uViewportH: { value: 1080 } },
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, fog: false,
+      vertexShader: /* glsl */ `
+        uniform float uTime; uniform float uViewportH;
+        attribute float aLife; attribute float aSeed;
+        varying float vA; varying float vFlash; varying float vShape; varying float vRot;
+        void main() {
+          vec4 mv = modelViewMatrix * vec4( position, 1.0 );
+          gl_Position = projectionMatrix * mv;
+          float size = mix( 0.045, 0.12, fract( aSeed * 7.13 ) );               // varied sizes
+          float px = size * uViewportH * projectionMatrix[ 1 ][ 1 ] * 0.5 / max( - mv.z, 0.1 );
+          gl_PointSize = aLife > 0.0 ? clamp( px, 1.5, 24.0 ) : 0.0;
+          vShape = floor( fract( aSeed * 3.71 ) * 3.0 );                        // 0 bead · 1 star · 2 shard
+          vRot = aSeed * 6.2831 + uTime * ( fract( aSeed * 5.3 ) - 0.5 ) * 7.0;   // tumbling crystals
+          float tw = 0.65 + 0.35 * sin( uTime * 34.0 + aSeed * 61.0 );
+          // ~35% of the crystals catch the light once: a quick bright glint before they vanish
+          vFlash = step( fract( aSeed * 11.3 ), 0.35 ) * exp( - pow( ( aLife - 0.55 ) / 0.07, 2.0 ) );
+          vA = pow( max( aLife, 0.0 ), 0.7 ) * tw * clamp( px / 2.0, 0.35, 1.0 );
+        }`,
+      fragmentShader: /* glsl */ `
+        varying float vA; varying float vFlash; varying float vShape; varying float vRot;
+        void main() {
+          vec2 c = gl_PointCoord - 0.5;
+          float cs = cos( vRot ), sn = sin( vRot );
+          c = vec2( cs * c.x - sn * c.y, sn * c.x + cs * c.y );
+          float r = length( c ) * 2.0;
+          float core = exp( - r * r * 18.0 );                                   // crisp centre (not a soft snow blob)
+          float star = ( exp( - abs( c.x ) * 34.0 ) * exp( - abs( c.y ) * 5.0 ) +
+                         exp( - abs( c.y ) * 34.0 ) * exp( - abs( c.x ) * 5.0 ) ) * ( 1.0 - r );
+          float shard = 1.0 - smoothstep( 0.18, 0.32, abs( c.x ) * 1.0 + abs( c.y ) * 3.4 );
+          float shape = vShape < 0.5 ? core + star * 0.35 : ( vShape < 1.5 ? core * 0.8 + star : shard * 0.55 + core * 0.6 );
+          float a = shape * vA;
+          vec3 col = vec3( 0.72, 0.86, 1.0 ) * a * 0.95;                       // cold, see-through ice tone
+          col += vec3( 0.95, 0.98, 1.0 ) * ( core * 2.0 + star * 1.2 ) * vFlash * 1.6; // brief bright glint
+          if ( max( col.r, col.b ) < 0.004 ) discard;
+          gl_FragColor = vec4( col, 1.0 );
+        }`,
+    });
+    this.dust = new THREE.Points(dg, this.dustMat);
+    this.dust.frustumCulled = false;
+    scene.add(this.dust);
+
+    // ---- marks ring buffer (4 verts / quad) ----
+    this.mN = marks;
+    this.mPos = new Float32Array(marks * 4 * 3);
+    this.mBirth = new Float32Array(marks * 4).fill(-100);
+    const idx = new Uint32Array(marks * 6);
+    for (let i = 0; i < marks; i++) idx.set([i * 4, i * 4 + 1, i * 4 + 2, i * 4 + 2, i * 4 + 1, i * 4 + 3], i * 6);
+    const mg = new THREE.BufferGeometry();
+    mg.setAttribute('position', new THREE.BufferAttribute(this.mPos, 3));
+    mg.setAttribute('aBirth', new THREE.BufferAttribute(this.mBirth, 1));
+    mg.setAttribute('aEdge', new THREE.BufferAttribute(new Float32Array(marks * 4).map((_, i) => (i % 2 ? 1 : -1)), 1));
+    this.mAcross = new Float32Array(marks * 4 * 2);
+    mg.setAttribute('aAcross', new THREE.BufferAttribute(this.mAcross, 2));
+    mg.setIndex(new THREE.BufferAttribute(idx, 1));
+    this.markMat = new THREE.ShaderMaterial({
+      uniforms: { uTime: { value: 0 } },
+      transparent: true, depthWrite: false, fog: false,
+      polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+      vertexShader: /* glsl */ `
+        attribute float aBirth; attribute float aEdge; attribute vec2 aAcross;
+        varying float vAge; varying float vEdge; varying vec2 vAcross; varying vec2 vXZ;
+        void main() {
+          vAge = aBirth; vEdge = aEdge; vAcross = aAcross; vXZ = position.xz;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+        }`,
+      fragmentShader: /* glsl */ `
+        uniform float uTime;
+        varying float vAge; varying float vEdge; varying vec2 vAcross; varying vec2 vXZ;
+        void main() {
+          float age = uTime - vAge;
+          float life = ( 1.0 - smoothstep( 0.375, 0.5, age ) ) * smoothstep( 0.0, 0.03, age ); // gone ~0.5 s after it is cut
+          float grad = 0.49 * mix( 0.8, 0.05, smoothstep( 0.0, 0.5, age ) );               // another 30% softer: newest ~39% → oldest ~2.5% (same ratio)
+          float ae = abs( vEdge );
+          float body = 1.0 - smoothstep( 0.8, 1.0, ae );
+          // shallow groove: the wall facing the tree light catches a highlight, the other falls into shadow
+          vec2 L = normalize( - vXZ + vec2( 1e-4 ) );
+          float facing = dot( - sign( vEdge ) * vAcross, L );
+          float wall = smoothstep( 0.3, 0.75, ae ) * ( 1.0 - smoothstep( 0.8, 1.0, ae ) );
+          float hi = wall * max( facing, 0.0 );
+          float sh = wall * max( - facing, 0.0 );
+          float floorShade = 1.0 - smoothstep( 0.0, 0.45, ae );
+          vec3 col = vec3( 0.11, 0.15, 0.21 );                                 // frosted floor of the cut
+          col = mix( col, vec3( 0.03, 0.05, 0.08 ), clamp( sh * 0.85 + floorShade * 0.3, 0.0, 1.0 ) );
+          col = mix( col, mix( vec3( 0.8, 0.9, 1.0 ), vec3( 1.0, 0.82, 0.62 ), 0.3 ), hi * 0.85 ); // lit lip (a touch of tree warmth)
+          float a = body * grad * life;
+          if ( a < 0.004 ) discard;
+          gl_FragColor = vec4( col, a );
+        }`,
+    });
+    this.marks = new THREE.Mesh(mg, this.markMat);
+    this.marks.frustumCulled = false;
+    this.marks.renderOrder = 1;
+    scene.add(this.marks);
+    this.mNext = 0;
+    this.last = [null, null];  // last mark point per blade
+    this.spawnAcc = [0, 0];
+  }
+
+  setViewportHeight(h) { this.dustMat.uniforms.uViewportH.value = h; }
+
+  _blade(leg, out) {               // bottom-centre of the blade in world space
+    return leg.ankle.localToWorld(out.set(0, -this.player.rig.L.foot, 0.03));
+  }
+
+  _addMark(a, b) {
+    const dx = b.x - a.x, dz = b.z - a.z, len = Math.hypot(dx, dz);
+    if (len < 1e-4) return;
+    const w = 0.01 + Math.random() * 0.005;                         // 2–3 cm wide shallow cut
+    const nx = (-dz / len) * w, nz = (dx / len) * w, y = this.iceY + 0.004;
+    const i = this.mNext, o = i * 12;
+    this.mPos.set([a.x - nx, y, a.z - nz, a.x + nx, y, a.z + nz, b.x - nx, y, b.z - nz, b.x + nx, y, b.z + nz], o);
+    this.mBirth.fill(this.time, i * 4, i * 4 + 4);
+    const ux = -dz / len, uz = dx / len;
+    this.mAcross.set([ux, uz, ux, uz, ux, uz, ux, uz], i * 8);
+    this.mNext = (i + 1) % this.mN;
+    this.marksDirty = true;
+  }
+
+  _spawnDust(p, travel) {
+    const i = this.dNext; this.dNext = (i + 1) % this.dN;
+    const life = 0.25 + Math.random() * 0.35;
+    this.dLife[i] = life; this.dMax[i] = life;
+    this.dPos.set([p.x + (Math.random() - 0.5) * 0.12, this.iceY + 0.01, p.z + (Math.random() - 0.5) * 0.12], i * 3);
+    const a = Math.random() * Math.PI * 2, s = 0.3 + Math.random() * 0.6;
+    this.dVel.set([Math.cos(a) * s - travel.x * 0.12, 0.4 + Math.random() * 0.7, Math.sin(a) * s - travel.z * 0.12], i * 3);
+  }
+
+  update(dt) {
+    this.time += dt;
+    this.dustMat.uniforms.uTime.value = this.time;
+    this.markMat.uniforms.uTime.value = this.time;
+    const pl = this.player, R = pl.rig;
+    pl.mesh.updateMatrixWorld(true);
+
+    [R.legL, R.legR].forEach((leg, k) => {
+      const p = this._blade(leg, new THREE.Vector3());
+      const onIce = p.y < this.iceY + 0.03;
+      const prev = this.last[k];
+      if (!onIce) { this.last[k] = null; return; }
+      if (prev) {
+        const travel = this._v.set(p.x - prev.x, 0, p.z - prev.z);
+        const d = travel.length();
+        const speed = d / Math.max(dt, 1e-4);
+        if (d > Math.max(0.1, speed * 0.012)) { this._addMark(prev, p); this.last[k] = p; } // longer segments at speed keep ~3.8 s of marks
+        // dust: occasional, more at speed (≈1 → 12 sparks/s per blade)
+        this.spawnAcc[k] += dt * Math.min(12, 0.4 + speed * 0.9) * (speed > 0.4 ? 1 : 0);
+        while (this.spawnAcc[k] >= 1) {
+          this.spawnAcc[k] -= 1;
+          if (Math.random() < 0.7) this._spawnDust(p, travel.clone().multiplyScalar(1 / Math.max(dt, 1e-4)));
+        }
+      } else {
+        this.last[k] = p;
+      }
+    });
+
+    // dust simulation (tiny pool)
+    const lifeAttr = this.dust.geometry.attributes.aLife;
+    for (let i = 0; i < this.dN; i++) {
+      if (this.dLife[i] <= 0) { lifeAttr.array[i] = 0; continue; }
+      this.dLife[i] -= dt;
+      const o = i * 3;
+      this.dVel[o + 1] -= 3.0 * dt;
+      this.dVel[o] *= 0.94; this.dVel[o + 2] *= 0.94;
+      this.dPos[o] += this.dVel[o] * dt;
+      this.dPos[o + 1] = Math.max(this.iceY + 0.005, this.dPos[o + 1] + this.dVel[o + 1] * dt);
+      this.dPos[o + 2] += this.dVel[o + 2] * dt;
+      lifeAttr.array[i] = Math.max(0, this.dLife[i] / this.dMax[i]);
+    }
+    lifeAttr.needsUpdate = true;
+    this.dust.geometry.attributes.position.needsUpdate = true;
+    if (this.marksDirty) {
+      this.marks.geometry.attributes.position.needsUpdate = true;
+      this.marks.geometry.attributes.aBirth.needsUpdate = true;
+      this.marks.geometry.attributes.aAcross.needsUpdate = true;
+      this.marksDirty = false;
+    }
+  }
+}
+
 // ===== main.js =====
 
 
@@ -1829,6 +2049,8 @@ console.info('[WinterRink]', world.stats);
 const player = new PlaceholderPlayer(scene, world.bounds);
 const cine = new FollowCamera(camera);
 const controls = new PointerControls(renderer.domElement, camera, cine, player, world.bounds, scene);
+const skateFx = new SkateFX(scene, player, world.bounds);
+skateFx.setViewportHeight(renderer.getDrawingBufferSize(new THREE.Vector2()).y);
 
 // ---- temporary Triple Axel button --------------------------------------------
 const axelBtn = document.createElement('button');
@@ -1866,6 +2088,7 @@ function onResize() {
   bloom.resolution.set(w, h);
   const b = renderer.getDrawingBufferSize(new THREE.Vector2());
   world.setSize(b.x, b.y, renderer.getPixelRatio());
+  if (typeof skateFx !== 'undefined') skateFx.setViewportHeight(b.y);
 }
 window.addEventListener('resize', onResize);
 
@@ -1879,6 +2102,7 @@ renderer.setAnimationLoop((now) => {
   player.update(dt);
   cine.update(dt, player.position, player.heading);
   controls.update(dt);
+  skateFx.update(dt);
   world.update(t);
   composer.render(dt);
 });
