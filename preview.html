@@ -1384,11 +1384,16 @@ class PlaceholderPlayer {
     v.x += ix * 14 * dt;
     v.z += iz * 14 * dt;
     v.multiplyScalar(Math.exp(-1.2 * dt)); // icy glide
-    if (this.glideOut) {                    // post-landing coast: half the friction → twice the glide
-      if (ix || iz || this.target || v.length() < 0.15) this.glideOut = false;
-      else v.multiplyScalar(Math.exp(0.6 * dt));
+    if (this.glideOut) {                    // post-landing coast: speed eases out smoothly to a stop
+      const G = this.glideOutState;
+      G.t += dt;
+      if (ix || iz || this.target || G.t >= G.time) this.glideOut = false;
+      else {
+        const sp = G.v0 * (1 - G.t / G.time) ** G.p;
+        if (v.lengthSq() > 1e-6) v.setLength(sp);   // keep direction (slides along the boards if it meets them)
+      }
     }
-    if (v.length() > 9) v.setLength(9);
+    if (!this.glideOut && v.length() > 9) v.setLength(9);
 
     const p = this.mesh.position;
     p.addScaledVector(v, dt);
@@ -1426,32 +1431,46 @@ class PlaceholderPlayer {
   startTripleAxel(onEnd) {
     if (this.trick) return false;
     const v = this.velocity;
-    if (v.length() < 2.5) v.set(Math.sin(this.heading), 0, Math.cos(this.heading)).multiplyScalar(3.5); // keep gliding into it
+    if (v.length() < 1.0) v.set(Math.sin(this.heading), 0, Math.cos(this.heading)).multiplyScalar(1.0); // gentle creep into the prep
     this.trick = { t: 0, onEnd };
     return true;
   }
 
   _applyTrick(dt) {
     const T = this.trick;
-    T.t += dt;
+    const PREP = 0.1, AIR = 1.5, END = 2.2;   // prep 0.1 s · air 1.5 s · landing 0.6 s (animation time)
+    const EASE = 0.3;                          // peak speed-up in the middle (1 + EASE)
+    const CROUCH = 0.4, CUSHION = 0.3, CUSHION_AT = 1.65;   // new separate phases (real seconds)
+    T.hold1 = T.hold1 || 0; T.hold2 = T.hold2 || 0;
+    if (!T.crouchDone && T.t >= PREP - 1e-6) {                        // compress & gather power, then spring
+      T.hold1 += dt; if (T.hold1 >= CROUCH) T.crouchDone = true;
+    } else if (!T.cushionDone && T.t >= CUSHION_AT) {                 // absorb the landing
+      T.hold2 += dt; if (T.hold2 >= CUSHION) T.cushionDone = true;
+      const slow = 1 - 0.7 * Math.sin(Math.PI * Math.min(1, T.hold2 / CUSHION)); // smooth 1 → 0.3 → 1, never a full stop
+      T.t += dt * slow * (1 + EASE * Math.sin((Math.PI * Math.min(T.t, END)) / END) ** 2);
+    } else {
+      T.t += dt * (1 + EASE * Math.sin((Math.PI * Math.min(T.t, END)) / END) ** 2);
+      if (!T.crouchDone) T.t = Math.min(T.t, PREP - 1e-6);
+      else if (!T.cushionDone) T.t = Math.min(T.t, CUSHION_AT);
+    }
     const t = T.t;
+    const pc = Math.min(1, T.hold1 / CROUCH), pl = Math.min(1, T.hold2 / CUSHION);
     const R = this.rig;
     const clamp01 = (x) => Math.min(1, Math.max(0, x));
     const sm = (a, b, x) => { const u = clamp01((x - a) / (b - a)); return u * u * (3 - 2 * u); };
     const mix = (obj, key, target, w) => { obj[key] = lerp(obj[key], target, w); };
-    const PREP = 0.2, AIR = 1.5, END = 2.4;   // prep 0.2 s · air 1.5 s · landing 0.7 s
 
     // weights
-    const wCross = sm(0.02, 0.2, t) * (1 - sm(1.7, 2.0, t));       // arms crossed: prep → air
-    const wCrouch = sm(0.06, 0.18, t) * (1 - sm(0.2, 0.3, t));        // take-off knee bend
-    const wAir = sm(0.2, 0.3, t) * (1 - sm(1.65, 1.75, t));           // tight air position
-    const wLand = sm(1.65, 1.75, t) * (1 - sm(2.0, 2.4, t));         // landing position
-    const wOpen = sm(1.7, 1.98, t) * (1 - sm(2.05, 2.4, t));           // arms open on landing
-    const absorb = Math.exp(-(((t - 1.82) / 0.13) ** 2));              // knee cushion at touchdown
+    const wCross = sm(0.01, 0.1, t) * (1 - sm(1.6, 1.85, t));       // arms crossed: prep → air
+    const wCrouch = T.crouchDone ? 0 : sm(0, 0.7, pc) * (1 - sm(0.82, 1, pc)); // 0.4 s: compress → drive up
+    const wAir = sm(0.1, 0.2, t) * (1 - sm(1.55, 1.65, t));           // tight air position
+    const wLand = sm(1.55, 1.65, t) * (1 - sm(1.9, 2.2, t));         // landing position
+    const wOpen = sm(1.6, 1.85, t) * (1 - sm(1.95, 2.2, t));           // arms open on landing
+    const absorb = T.cushionDone ? 0 : sm(0, 0.25, pl) * (1 - sm(0.35, 1, pl)); // 0.3 s: sink → rise
 
     // flight: height + exactly 3 turns about the vertical axis
     const u = clamp01((t - PREP) / AIR);
-    const jumpY = 1.5 * 4 * u * (1 - u);
+    const jumpY = 1.5 * (4 * u * (1 - u)) ** 2;                        // 0.46 m → 1.5 m (mid-spin) → 0.46 m
     const us = clamp01((u - 1 / 6) / (2 / 3));                         // 1.0 s window: same speed as before, one more turn
     const e = us * us * us * (us * (us * 6 - 15) + 10);                // fast in the middle
     const spin = Math.PI * 8 * e;                                      // exactly 1440° (4 turns)
@@ -1463,14 +1482,34 @@ class PlaceholderPlayer {
       mix(leg.knee.rotation, 'x', kn, w);
     };
     // take-off crouch on both legs
-    setLeg(R.legL, -0.4, 0.03, 0.85, wCrouch);
-    setLeg(R.legR, -0.4, -0.03, 0.85, wCrouch);
+    setLeg(R.legL, -0.6, 0.03, 0.85, wCrouch);
+    setLeg(R.legR, -0.6, -0.03, 0.85, wCrouch);
     // air: legs straight and together, right leg crossed slightly in front
     setLeg(R.legL, 0.06, -0.03, 0.06, wAir);
     setLeg(R.legR, -0.1, 0.03, 0.08, wAir);
     // landing: right leg supports and bends to absorb, left leg extends behind
     setLeg(R.legR, -0.35 - 0.25 * absorb, -0.04, 0.5 + 0.5 * absorb, wLand);
     setLeg(R.legL, 0.75, 0.14, 0.1, wLand);
+    // knees only: load before take-off → snap straight on the push → cushion on touchdown
+    const load = wCrouch;                                             // both knees bend deeper: gathering power
+    const spring = sm(0.1, 0.15, t) * (1 - sm(0.17, 0.28, t));        // knees drive straight as she leaves the ice
+    for (const leg of [R.legL, R.legR]) {
+      mix(leg.knee.rotation, 'x', Math.PI / 2, load);            // 90° knee bend
+      mix(leg.knee.rotation, 'x', 0.0, spring);
+    }
+    R.legL.knee.rotation.x += 0.3 * absorb * wLand;                    // free leg softens too (landing leg already bends)
+    R.legR.knee.rotation.x += 0.12 * absorb * wLand;
+    // follow-through: joints chase their target pose instead of jumping to it
+    T.sm = T.sm || {};
+    const kS = 1 - Math.exp(-dt * 18);
+    const follow = (obj, key, id) => {
+      if (T.sm[id] === undefined) T.sm[id] = obj[key];
+      T.sm[id] += (obj[key] - T.sm[id]) * kS;
+      obj[key] = T.sm[id];
+    };
+    for (const [n, leg] of [['L', R.legL], ['R', R.legR]]) {
+      follow(leg.hip.rotation, 'x', 'hx' + n); follow(leg.hip.rotation, 'z', 'hz' + n); follow(leg.knee.rotation, 'x', 'kn' + n);
+    }
     const point = 0.35 * Math.min(1, jumpY / 0.3) * wAir;              // pointed toes only when high enough
     for (const leg of [R.legL, R.legR]) {
       leg.ankle.rotation.x = -(leg.hip.rotation.x + leg.knee.rotation.x) + point;
@@ -1486,9 +1525,12 @@ class PlaceholderPlayer {
     mix(R.torso.rotation, 'x', 0.02, wBody);
     mix(R.torso.rotation, 'y', 0, wBody);
     mix(R.torso.rotation, 'z', 0, wBody);
+    mix(R.torso.rotation, 'x', 0.6, wCrouch * 0.9);                   // chest folds forward while compressing
     mix(R.torso.rotation, 'x', 0.22 + 0.15 * absorb, wLand);
     mix(R.torso.rotation, 'y', 0, wLand);
     mix(R.body.rotation, 'z', 0, Math.max(wAir, wLand));
+    follow(R.torso.rotation, 'x', 'tx'); follow(R.torso.rotation, 'y', 'ty'); follow(R.torso.rotation, 'z', 'tz');
+    follow(R.body.rotation, 'z', 'bz');
     R.neck.rotation.set(-R.torso.rotation.x * 0.7, -R.torso.rotation.y * 0.6, 0);
 
     // ---- arms: real shoulder/elbow joints form the X in front of the chest ----
@@ -1502,29 +1544,53 @@ class PlaceholderPlayer {
     setArm(R.armR, -1.5, 1.1, 0.7, -1.1, wCross);     // right forearm underneath
     setArm(R.armL, -0.25, 0, 1.25, -0.2, wOpen);
     setArm(R.armR, -0.25, 0, -1.25, -0.2, wOpen);
+    for (const [n, arm] of [['L', R.armL], ['R', R.armR]]) {
+      for (const k of ['x', 'y', 'z']) follow(arm.shoulder.rotation, k, 's' + k + n);
+      follow(arm.elbow.rotation, 'x', 'e' + n);
+    }
 
     // ---- forward travel: ~1 m from the take-off spot to the landing spot ----
     const pos = this.mesh.position, vel = this.velocity;
+    if (t < PREP) {
+      const hx = Math.sin(this.heading), hz = Math.cos(this.heading);
+      vel.lerp(new THREE.Vector3(hx * 1.0, 0, hz * 1.0), 1 - Math.exp(-dt * 8)); // settle into the take-off (gradual)
+    }
     if (t >= PREP && !T.takeoff) {
       T.takeoff = new THREE.Vector2(pos.x, pos.z);
       T.dir = new THREE.Vector2(Math.sin(this.heading), Math.cos(this.heading));
       T.saved = vel.clone();                                           // movement state to restore
-      // longest clear path up to 8 m (stays on the ice, outside the island)
+      // longest clear path up to 16 m (stays on the ice, outside the island)
       const { rx, rz, islandRadius } = this.bounds;
       const okAt = (d) => {
         const x = T.takeoff.x + T.dir.x * d, z = T.takeoff.y + T.dir.y * d;
         return Math.hypot(x / (rx - 0.8), z / (rz - 0.8)) <= 1 && Math.hypot(x, z) >= islandRadius + 0.8;
       };
       T.dist = 0;
-      for (let d = 0.1; d <= 8.0001; d += 0.1) { if (!okAt(d)) break; T.dist = d; }
+      for (let d = 0.1; d <= 16.0001; d += 0.1) { if (!okAt(d)) break; T.dist = d; }
     }
     if (T.takeoff && t < PREP + AIR) {
-      pos.x = T.takeoff.x + T.dir.x * T.dist * u;                      // continuous travel during the whole flight
-      pos.z = T.takeoff.y + T.dir.y * T.dist * u;
+      const rate = (x) => 1 + EASE * Math.sin((Math.PI * Math.min(x, END)) / END) ** 2;
+      const w0 = (1.0 * AIR) / 16 / rate(PREP);                       // take-off speed ≈ 1 m/s
+      const w1 = 1 / rate(PREP + AIR);                                // touchdown speed = glide start speed
+      const cFull = 3 * (1 - (w0 + w1) / 2);                           // extra speed concentrated in the spin
+      const sa = 1 / 6, sL = 2 / 3, xs = Math.min(Math.max(u - sa, 0), sL);
+      const B = w0 * sL + ((w1 - w0) * ((sa + sL) ** 2 - sa ** 2)) / 2; // base travel inside the spin window
+      const c = Math.max(0, 3 * ((B + cFull / 3) / 2 - B));             // → spin-phase travel halved
+      const S = w0 * u + ((w1 - w0) * u * u) / 2 + c * (xs / 2 - (sL / (4 * Math.PI)) * Math.sin((2 * Math.PI * xs) / sL));
+      T.S1 = (w0 + w1) / 2 + c / 3;                                    // fraction of T.dist covered by touchdown
+      // +0.5 m in the take-off posture (from leaving the ice to the start of the spin), eased in and out
+      T.extra = Math.min(0.5, Math.max(0, T.dist * (1 - T.S1)));
+      const ex = T.extra * sm(0, sa, u);
+      pos.x = T.takeoff.x + T.dir.x * (T.dist * S + ex);               // continuous travel through the whole flight
+      pos.z = T.takeoff.y + T.dir.y * (T.dist * S + ex);
     } else if (T.takeoff && !T.landed) {
       T.landed = true;
+      pos.x = T.takeoff.x + T.dir.x * (T.dist * (T.S1 ?? 1) + (T.extra || 0)); // touch down at the end of the flight path
+      pos.z = T.takeoff.y + T.dir.y * (T.dist * (T.S1 ?? 1) + (T.extra || 0));
       vel.set(T.dir.x, 0, T.dir.y).multiplyScalar(T.dist / AIR);          // carry the flight speed onto the ice
       this.glideOut = true;                                            // long coast after the landing
+      const v0 = T.dist / AIR, GLIDE_DIST = 13.3, GLIDE_TIME = 5.45;   // 1.5 × 8.9 m
+      this.glideOutState = { t: 0, v0, time: GLIDE_TIME, p: Math.max(1.2, (v0 * GLIDE_TIME) / GLIDE_DIST - 1) };
     }
 
     // ---- whole-body flight ----
