@@ -1,0 +1,1693 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#060c1a" />
+    <title>Magical Winter Forest Ice Rink</title>
+    <style>
+      html, body {
+        margin: 0; width: 100%; height: 100%; height: 100dvh; background: #060c1a;
+        overflow: hidden; overscroll-behavior: none; -webkit-user-select: none; user-select: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+      #app { position: fixed; inset: 0; }
+      #app, canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+      .title {
+        position: fixed; left: calc(28px + env(safe-area-inset-left)); bottom: calc(24px + env(safe-area-inset-bottom));
+        color: #f3d9b8; opacity: 0.75; font: 300 13px/1.5 "Helvetica Neue", Arial, sans-serif;
+        letter-spacing: 0.22em; text-transform: uppercase; pointer-events: none;
+      }
+      @media (max-width: 600px) { .title { font-size: 10px; letter-spacing: 0.16em; left: 16px; bottom: 14px; } }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div class="title">Magical Winter Forest Ice Rink</div>
+    <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js", "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/" } }
+    </script>
+    <script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+// ===== world/config.js =====
+// Magical Winter Forest Ice Rink — layout & look constants.
+// Tweak values here to rebalance the scene without touching the builders.
+
+const RINK = {
+  rx: 30, // ice half-width  (x)
+  rz: 21, // ice half-depth  (z)
+  iceY: 0.03,
+  boardHeight: 0.9,
+  boardThickness: 0.35,
+};
+
+const ISLAND_RADIUS = 6.2; // snow island under the central tree
+
+const CENTER_TREE = {
+  height: 19,
+  radius: 6.4,
+  tiers: 8,
+  strands: 7, // light strands running down from the top (≤ 10)
+  bulbSpacing: 0.42, // distance between bulbs along a strand
+  strandTwist: 0.9, // how far (×π) each strand winds on its way down
+};
+
+const FOREST = {
+  count: 22, // + 1 central tree = 23 trees total (limit 20~25), bare deciduous
+  seed: 2026,
+  frontGapDeg: [62, 118], // keep the arc in front of the camera open
+};
+
+const PALETTE = {
+  skyTop: 0x010207,
+  skyHorizon: 0x070f1f,
+  skyBottom: 0x060c1a,
+  fog: 0x060c1a,
+  fogDensity: 0.0105,
+  snow: 0xd8e2f0,
+  foliage: 0x0d2618,
+  foliageCenter: 0x0f2a1a,
+  trunk: 0x2a1a10,
+  bark: 0x2a2522,
+  boards: 0xcfd9e6,
+  iceDeep: 0x041224,
+  iceFrost: 0x3a5878,
+  // warm bulb colour in linear RGB (values > 1 feed the bloom pass)
+  bulbA: [1.0, 0.42, 0.1],
+  bulbB: [1.0, 0.6, 0.22],
+  warmLight: 0xff8c42,
+};
+
+const LIGHTING = {
+  exposure: 1.05,
+  hemi: { sky: 0x3a5a8c, ground: 0x0b0d14, intensity: 1.1 },
+  moon: { color: 0x9fb4e0, intensity: 0.3 },
+  treeRing: { count: 3, radius: 10, y: 3, intensity: 45, distance: 40, decay: 1.7 },
+  treeTop: { y: 14, z: 7, intensity: 26, distance: 30, decay: 1.7 },
+  // small standalone lanterns between some forest trees (no real lights)
+  lanterns: { max: 9, chance: 0.5, intensity: [1.2, 1.9], glowRadius: 3.2, glowStrength: 0.1 },
+  bloom: { strength: 0.8, radius: 0.5, threshold: 0.85 },
+  bulbIntensity: [2.6, 4.2],
+};
+
+// Automatic quality tier: phones / small touch screens get lighter settings.
+function detectQuality() {
+  const hasWindow = typeof window !== 'undefined';
+  const coarse = hasWindow && window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+  const small = hasWindow && Math.min(window.innerWidth, window.innerHeight) < 600;
+  const mobile = Boolean(coarse || small);
+  return mobile
+    ? { mobile, maxPixelRatio: 1.25, msaa: 0, snow: 650, bloomScale: 0.5, iceOctaves: 3 }
+    : { mobile, maxPixelRatio: 1.75, msaa: 4, snow: 1400, bloomScale: 1, iceOctaves: 4 };
+}
+const QUALITY = detectQuality();
+
+// Direction to the (small, faint) moon. Also used for the cool key light.
+const MOON_DIR = [-0.42, 0.24, -0.88];
+
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// ===== world/warmGlow.js =====
+
+
+// Cheap "bulb bounce" light: instead of giving every bulb a real light,
+// standard materials get a few soft warm spheres of emissive glow injected
+// via onBeforeCompile. Snow (white) catches it strongly, dark needles barely.
+
+const MAX_GLOW_POINTS = 32;
+
+function createWarmGlow(color = new THREE.Color(1.0, 0.42, 0.12)) {
+  const points = Array.from({ length: MAX_GLOW_POINTS }, () => new THREE.Vector4(0, -9999, 0, 1));
+  const strengths = new Array(MAX_GLOW_POINTS).fill(0);
+  const shared = {
+    uGlowPoints: { value: points },
+    uGlowStrength: { value: strengths },
+    uGlowCount: { value: 0 },
+    uGlowColor: { value: color },
+    uGlowFlicker: { value: 1 },
+  };
+
+  function add(x, y, z, radius, strength = 1) {
+    const i = shared.uGlowCount.value;
+    if (i >= MAX_GLOW_POINTS) return;
+    points[i].set(x, y, z, radius);
+    strengths[i] = strength;
+    shared.uGlowCount.value = i + 1;
+  }
+
+  function patch(material, gain = 1) {
+    const local = { uGlowGain: { value: gain } };
+    material.onBeforeCompile = (shader) => {
+      Object.assign(shader.uniforms, shared, local);
+      shader.vertexShader =
+        'varying vec3 vWarmWorld;\n' +
+        shader.vertexShader.replace(
+          '#include <project_vertex>',
+          `#include <project_vertex>
+          vec4 wgP = vec4( transformed, 1.0 );
+          #ifdef USE_INSTANCING
+            wgP = instanceMatrix * wgP;
+          #endif
+          vWarmWorld = ( modelMatrix * wgP ).xyz;`
+        );
+      shader.fragmentShader =
+        `#define WG_MAX ${MAX_GLOW_POINTS}
+        uniform vec4 uGlowPoints[WG_MAX];
+        uniform float uGlowStrength[WG_MAX];
+        uniform int uGlowCount;
+        uniform vec3 uGlowColor;
+        uniform float uGlowGain;
+        uniform float uGlowFlicker;
+        varying vec3 vWarmWorld;\n` +
+        shader.fragmentShader.replace(
+          '#include <emissivemap_fragment>',
+          `#include <emissivemap_fragment>
+          float wgSum = 0.0;
+          for ( int i = 0; i < WG_MAX; i ++ ) {
+            if ( i >= uGlowCount ) break;
+            vec3 wgD = vWarmWorld - uGlowPoints[ i ].xyz;
+            float wgR = uGlowPoints[ i ].w;
+            wgSum += uGlowStrength[ i ] * exp( - dot( wgD, wgD ) / ( wgR * wgR ) );
+          }
+          totalEmissiveRadiance += uGlowColor * diffuseColor.rgb * wgSum * uGlowGain * uGlowFlicker;`
+        );
+    };
+    material.customProgramCacheKey = () => 'warm-glow';
+    return material;
+  }
+
+  return { add, patch, uniforms: shared };
+}
+
+// ===== world/bulbs.js =====
+
+
+// Every string-light bulb in the scene (tree, forest, rink rail) lives in ONE
+// THREE.Points draw call. Bulbs are HDR-bright sprites (> 1.0) so the bloom
+// pass makes them glow; no per-bulb real-time lights.
+
+const vertexShader = /* glsl */ `
+  uniform float uTime;
+  uniform float uViewportH;
+  uniform float uFade;
+  attribute vec3 aColor;
+  attribute float aSize;
+  attribute float aPhase;
+  varying vec3 vColor;
+  varying float vTw;
+  void main() {
+    vec4 mv = modelViewMatrix * vec4( position, 1.0 );
+    gl_Position = projectionMatrix * mv;
+    float dist = max( - mv.z, 0.1 );
+    float px = aSize * uViewportH * projectionMatrix[ 1 ][ 1 ] * 0.5 / dist;
+    gl_PointSize = clamp( px, 1.5, 48.0 );
+    float speed = 0.8 + fract( aPhase * 13.37 ) * 2.2;
+    vTw = 0.78 + 0.22 * sin( uTime * speed + aPhase * 6.2831 );
+    vTw *= clamp( px / 1.5, 0.35, 1.0 );          // fade sub-pixel bulbs instead of shimmering
+    vTw *= exp( - pow( dist * 0.006 * uFade, 2.0 ) ); // gentle atmospheric falloff
+    vColor = aColor;
+  }
+`;
+
+const fragmentShader = /* glsl */ `
+  varying vec3 vColor;
+  varying float vTw;
+  void main() {
+    vec2 c = gl_PointCoord - 0.5;
+    float r2 = dot( c, c ) * 4.0;
+    if ( r2 > 1.0 ) discard;
+    float core = exp( - r2 * 14.0 );
+    float halo = exp( - r2 * 3.5 ) * 0.35;
+    vec3 col = vColor * ( core + halo ) * vTw;
+    col += vec3( 1.0, 0.86, 0.62 ) * core * vTw * 0.9;  // hot filament centre
+    gl_FragColor = vec4( col, 1.0 );
+  }
+`;
+
+class BulbField {
+  constructor() {
+    this.positions = [];
+    this.colors = [];
+    this.sizes = [];
+    this.phases = [];
+    this.material = null;
+  }
+
+  add(x, y, z, size, r, g, b) {
+    this.positions.push(x, y, z);
+    this.colors.push(r, g, b);
+    this.sizes.push(size);
+    this.phases.push(Math.random());
+  }
+
+  get count() {
+    return this.sizes.length;
+  }
+
+  build() {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(this.positions, 3));
+    geo.setAttribute('aColor', new THREE.Float32BufferAttribute(this.colors, 3));
+    geo.setAttribute('aSize', new THREE.Float32BufferAttribute(this.sizes, 1));
+    geo.setAttribute('aPhase', new THREE.Float32BufferAttribute(this.phases, 1));
+    geo.computeBoundingSphere();
+
+    this.material = new THREE.ShaderMaterial({
+      uniforms: { uTime: { value: 0 }, uViewportH: { value: 1080 }, uFade: { value: 1 } },
+      vertexShader,
+      fragmentShader,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      fog: false,
+    });
+    const points = new THREE.Points(geo, this.material);
+    points.name = 'StringLights';
+    points.frustumCulled = false;
+    return points;
+  }
+}
+
+// Helper: a warm bulb colour with slight per-bulb variation (linear HDR).
+function warmBulbColor(rng, palette, intensityRange) {
+  const t = rng();
+  const k = intensityRange[0] + rng() * (intensityRange[1] - intensityRange[0]);
+  const [a, b] = [palette.bulbA, palette.bulbB];
+  return [
+    (a[0] + (b[0] - a[0]) * t) * k,
+    (a[1] + (b[1] - a[1]) * t) * k,
+    (a[2] + (b[2] - a[2]) * t) * k,
+  ];
+}
+
+// ===== world/sky.js =====
+
+
+
+// Near-black navy dome, a sparse handful of dim stars and a small faint moon.
+// No city glow, no buildings.
+
+function createSky({ radius = 450 } = {}) {
+  const group = new THREE.Group();
+  group.name = 'NightSky';
+
+  const dome = new THREE.Mesh(
+    new THREE.SphereGeometry(radius, 32, 16),
+    new THREE.ShaderMaterial({
+      side: THREE.BackSide,
+      depthWrite: false,
+      fog: false,
+      uniforms: {
+        uTop: { value: new THREE.Color(PALETTE.skyTop) },
+        uHorizon: { value: new THREE.Color(PALETTE.skyHorizon) },
+        uBottom: { value: new THREE.Color(PALETTE.skyBottom) },
+      },
+      vertexShader: /* glsl */ `
+        varying vec3 vDir;
+        void main() {
+          vDir = normalize( position );
+          gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+        }`,
+      fragmentShader: /* glsl */ `
+        uniform vec3 uTop; uniform vec3 uHorizon; uniform vec3 uBottom;
+        varying vec3 vDir;
+        void main() {
+          float h = normalize( vDir ).y;
+          vec3 col = mix( uHorizon, uTop, smoothstep( 0.0, 0.55, h ) );
+          col = mix( col, uBottom, smoothstep( 0.0, -0.15, h ) );
+          float n = fract( sin( dot( gl_FragCoord.xy, vec2( 12.9898, 78.233 ) ) ) * 43758.5453 );
+          col += ( n - 0.5 ) * 0.0015; // dither to avoid banding in the dark gradient
+          gl_FragColor = vec4( col, 1.0 );
+        }`,
+    })
+  );
+  dome.renderOrder = -10;
+  group.add(dome);
+
+  // --- sparse stars ---------------------------------------------------------
+  const rng = mulberry32(77);
+  const STAR_COUNT = 160;
+  const pos = [], size = [], phase = [], bright = [];
+  const r = radius * 0.92;
+  while (size.length < STAR_COUNT) {
+    const u = rng() * 2 - 1, th = rng() * Math.PI * 2;
+    const s = Math.sqrt(1 - u * u);
+    const d = [s * Math.cos(th), u, s * Math.sin(th)];
+    if (d[1] < 0.14) continue; // only above the treeline
+    pos.push(d[0] * r, d[1] * r, d[2] * r);
+    size.push(1.0 + rng() * 1.4);
+    phase.push(rng());
+    bright.push(0.12 + Math.pow(rng(), 3) * 0.45);
+  }
+  const starGeo = new THREE.BufferGeometry();
+  starGeo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  starGeo.setAttribute('aSize', new THREE.Float32BufferAttribute(size, 1));
+  starGeo.setAttribute('aPhase', new THREE.Float32BufferAttribute(phase, 1));
+  starGeo.setAttribute('aBright', new THREE.Float32BufferAttribute(bright, 1));
+  const starMat = new THREE.ShaderMaterial({
+    uniforms: { uTime: { value: 0 }, uPixelRatio: { value: 1 } },
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    fog: false,
+    vertexShader: /* glsl */ `
+      uniform float uTime; uniform float uPixelRatio;
+      attribute float aSize; attribute float aPhase; attribute float aBright;
+      varying float vB;
+      void main() {
+        gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+        gl_PointSize = aSize * uPixelRatio;
+        vB = aBright * ( 0.75 + 0.25 * sin( uTime * ( 0.5 + aPhase ) + aPhase * 20.0 ) );
+      }`,
+    fragmentShader: /* glsl */ `
+      varying float vB;
+      void main() {
+        float r = length( gl_PointCoord - 0.5 ) * 2.0;
+        float a = smoothstep( 1.0, 0.0, r );
+        gl_FragColor = vec4( vec3( 0.75, 0.82, 1.0 ) * vB, a );
+      }`,
+  });
+  const stars = new THREE.Points(starGeo, starMat);
+  stars.frustumCulled = false;
+  group.add(stars);
+
+  // --- small faint moon -----------------------------------------------------
+  const moonDir = new THREE.Vector3(...MOON_DIR).normalize();
+  const moon = new THREE.Mesh(
+    new THREE.PlaneGeometry(1, 1),
+    new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      fog: false,
+      vertexShader: /* glsl */ `
+        varying vec2 vUv;
+        void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 ); }`,
+      fragmentShader: /* glsl */ `
+        varying vec2 vUv;
+        void main() {
+          float r = length( vUv - 0.5 ) * 2.0;
+          float disc = smoothstep( 0.2, 0.18, r );
+          float halo = exp( - r * 5.0 ) * 0.12;
+          vec3 col = vec3( 0.52, 0.58, 0.7 ) * disc * 0.55 + vec3( 0.25, 0.32, 0.5 ) * halo;
+          gl_FragColor = vec4( col, 1.0 );
+        }`,
+    })
+  );
+  moon.position.copy(moonDir).multiplyScalar(radius * 0.85);
+  moon.scale.setScalar(34);
+  moon.lookAt(0, 0, 0);
+  group.add(moon);
+
+  return {
+    group,
+    moonDir,
+    update(t) {
+      starMat.uniforms.uTime.value = t;
+    },
+    setPixelRatio(pr) {
+      starMat.uniforms.uPixelRatio.value = pr;
+    },
+  };
+}
+
+// ===== world/firTree.js =====
+
+
+// Low-poly snow-laden fir built from stacked cones. Geometries are unit-sized
+// and shared; each tier is one instance in an InstancedMesh, so the whole
+// forest costs only a few draw calls.
+
+const SEGMENTS = 14;
+
+/** Foliage tier: unit cone, base at y=0, jagged drooping lower edge. */
+function createFoliageGeometry() {
+  const g = new THREE.ConeGeometry(1, 1, SEGMENTS, 2, false);
+  g.translate(0, 0.5, 0);
+  const p = g.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+    const rad = Math.hypot(x, z);
+    if (rad < 1e-4) continue;
+    const a = Math.atan2(z, x);
+    // ConeGeometry places segment j at theta = j/SEGMENTS·2π with x = sin, z = cos
+    let theta = Math.atan2(x, z);
+    if (theta < 0) theta += Math.PI * 2;
+    const k = (Math.round((theta / (Math.PI * 2)) * SEGMENTS) % SEGMENTS) % 2;
+    if (y < 0.01) {
+      const s = k ? 1.0 : 0.8;
+      p.setXYZ(i, x * s, k ? -0.06 : 0.05, z * s);
+    } else if (y < 0.9) {
+      const s = 1 + 0.05 * Math.sin(a * 5.0);
+      p.setXYZ(i, x * s, y, z * s);
+    }
+  }
+  g.computeVertexNormals();
+  return g;
+}
+
+/** Snow cap: unit cone with a soft wavy, drooping rim. */
+function createSnowCapGeometry() {
+  const g = new THREE.ConeGeometry(1, 1, SEGMENTS, 1, false);
+  g.translate(0, 0.5, 0);
+  const p = g.attributes.position;
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+    if (y > 0.01 || Math.hypot(x, z) < 1e-4) continue;
+    const a = Math.atan2(z, x);
+    const s = 1 + 0.06 * Math.sin(a * 7 + 1);
+    p.setXYZ(i, x * s, 0.08 * Math.sin(a * 7) - 0.05, z * s);
+  }
+  g.computeVertexNormals();
+  return g;
+}
+
+function createTrunkGeometry() {
+  const g = new THREE.CylinderGeometry(0.55, 0.75, 1, 8, 1, true);
+  g.translate(0, 0.5, 0);
+  return g;
+}
+
+/**
+ * Describe a fir as tiers. Returns tiers (foliage) + caps (snow) in local
+ * space (base at y=0) and an envelope(y) radius function used to wrap lights.
+ */
+function describeFir({ height, radius, tiers, capCover = 0.58 }) {
+  const trunkH = height * 0.1;
+  const span = height - trunkH;
+  const list = [];
+  const caps = [];
+  for (let i = 0; i < tiers; i++) {
+    const t = tiers > 1 ? i / (tiers - 1) : 0;
+    const r = radius * (1 - t * 0.82);
+    const h = span * (0.42 - t * 0.12);
+    const yBase = trunkH + t * (span - h);
+    list.push({ yBase, h, r });
+    const capH = h * capCover;
+    caps.push({ yBase: yBase + h * (1 - capCover) + h * 0.02, h: capH, r: r * (capCover + 0.06) });
+  }
+  const cones = list.concat(caps);
+  const envelope = (y) => {
+    let best = 0;
+    for (const c of cones) {
+      if (y < c.yBase || y > c.yBase + c.h) continue;
+      best = Math.max(best, c.r * (1 - (y - c.yBase) / c.h));
+    }
+    return best;
+  };
+  return { height, radius, trunkH, tiers: list, caps, envelope };
+}
+
+/**
+ * Wrap a fir with string lights: several spiral strands plus scattered bulbs.
+ * Calls emit(x, y, z) in the tree's local space.
+ */
+function wrapLights(desc, count, rng, emit, { strands = 3, turns = 7, offset = 0.12, scatter = 0.3 } = {}) {
+  const top = desc.height * 0.985;
+  const minY = desc.trunkH + 0.1;
+  let placed = 0, guard = 0;
+  while (placed < count && guard++ < count * 40) {
+    const y = minY + rng() * (top - minY);
+    const env = desc.envelope(y);
+    if (env <= 0.05) continue;
+    if (rng() > env / desc.radius + 0.06) continue; // density ∝ surface area
+    let a;
+    if (rng() > scatter) {
+      const s = placed % strands;
+      a = (s / strands) * Math.PI * 2 + (y / desc.height) * turns * Math.PI * 2 + (rng() - 0.5) * 0.25;
+    } else {
+      a = rng() * Math.PI * 2;
+    }
+    const r = env + offset + rng() * 0.06;
+    emit(Math.cos(a) * r, y, Math.sin(a) * r);
+    placed++;
+  }
+  return placed;
+}
+
+/** Push instance matrices for one tree into the given instanced arrays. */
+function pushFirInstances(desc, position, rotY, out) {
+  const m = new THREE.Matrix4();
+  const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), rotY);
+  const s = new THREE.Vector3();
+  const p = new THREE.Vector3();
+  for (const t of desc.tiers) {
+    p.set(position.x, position.y + t.yBase, position.z);
+    out.foliage.push(m.compose(p, q, s.set(t.r, t.h, t.r)).clone());
+  }
+  for (const c of desc.caps) {
+    p.set(position.x, position.y + c.yBase, position.z);
+    out.caps.push(m.compose(p, q, s.set(c.r, c.h, c.r)).clone());
+  }
+  p.set(position.x, position.y - 0.2, position.z);
+  const tr = desc.radius * 0.12;
+  out.trunks.push(m.compose(p, q, s.set(tr, desc.trunkH + 0.6, tr)).clone());
+}
+
+function toInstancedMesh(geometry, material, matrices, name) {
+  const mesh = new THREE.InstancedMesh(geometry, material, matrices.length);
+  matrices.forEach((mx, i) => mesh.setMatrixAt(i, mx));
+  mesh.instanceMatrix.needsUpdate = true;
+  mesh.computeBoundingSphere();
+  mesh.name = name;
+  return mesh;
+}
+
+// ===== world/deciduousTree.js =====
+
+
+// Bare winter (deciduous) tree: a recursively forking branch skeleton with no
+// leaves. Every branch segment is one instance of a single shared tapered
+// cylinder; snow ridges sit on top of the more horizontal branches and small
+// snow clumps collect in the forks.
+
+const UP = new THREE.Vector3(0, 1, 0);
+const X = new THREE.Vector3(1, 0, 0);
+
+function createBranchGeometry() {
+  const g = new THREE.CylinderGeometry(0.72, 1, 1, 6, 1, true); // tapers 28% per segment
+  g.translate(0, 0.5, 0);
+  return g;
+}
+
+function createSnowRidgeGeometry() {
+  const g = new THREE.CylinderGeometry(0.8, 1, 1, 6, 1, false);
+  g.translate(0, 0.5, 0);
+  return g;
+}
+
+function createSnowClumpGeometry() {
+  return new THREE.IcosahedronGeometry(1, 1);
+}
+
+function deviate(dir, azimuth, tilt) {
+  const ref = Math.abs(dir.y) < 0.95 ? UP : X;
+  const u = new THREE.Vector3().crossVectors(dir, ref).normalize();
+  const v = new THREE.Vector3().crossVectors(dir, u);
+  return dir.clone().multiplyScalar(Math.cos(tilt))
+    .addScaledVector(u, Math.cos(azimuth) * Math.sin(tilt))
+    .addScaledVector(v, Math.sin(azimuth) * Math.sin(tilt))
+    .normalize();
+}
+
+/**
+ * Grow one tree into `out` = { bark: Matrix4[], snow: Matrix4[], clumps: Matrix4[] }.
+ * `snowiness` (0..1) varies how heavily each tree is laden.
+ */
+function growDeciduousTree(rng, { position, height, rotY = 0, snowiness = 0.7 }, out) {
+  const maxDepth = height > 12.5 ? 4 : 3;
+  const q = new THREE.Quaternion();
+  const s = new THREE.Vector3();
+  const lean = new THREE.Vector3((rng() - 0.5) * 0.12, 1, (rng() - 0.5) * 0.12).normalize();
+  const spin = new THREE.Quaternion().setFromAxisAngle(UP, rotY);
+  const local = { bark: [], snow: [], clumps: [] }; // grown in tree space, placed at the end
+  let topY = 0; // highest point reached, used to normalise to the design height
+
+  const push = (list, start, dir, len, radius) => {
+    q.setFromUnitVectors(UP, dir);
+    list.push(new THREE.Matrix4().compose(start.clone(), q.clone(), s.set(radius, len, radius).clone()));
+  };
+
+  function branch(start, dir, len, radius, depth) {
+    const segs = depth === 0 ? 3 : depth < maxDepth ? 2 : 1;
+    const segLen = len / segs;
+    const p = start.clone();
+    const d = dir.clone();
+    let r = radius;
+    for (let i = 0; i < segs; i++) {
+      const wander = depth === 0 ? 0.12 : 0.32;
+      d.x += (rng() - 0.5) * wander;
+      d.z += (rng() - 0.5) * wander;
+      if (depth > 0) d.y += 0.07; // reach for the light
+      d.normalize();
+      push(local.bark, p, d, segLen * 1.04, r);
+
+      // snow ridge on the upper side of non-vertical branches, thick or thin
+      const flat = 1 - Math.abs(d.y);
+      if (flat > 0.12 && r > 0.018 && rng() < 0.55 + snowiness * 0.4) {
+        const thick = (0.45 + rng() * 0.55) * (0.5 + flat * 0.6) * (0.6 + snowiness * 0.5);
+        const sr = r * (0.5 + 0.55 * thick);
+        const upPerp = UP.clone().addScaledVector(d, -d.y).normalize();
+        const sp = p.clone().addScaledVector(upPerp, r * 0.45 + sr * 0.4);
+        push(local.snow, sp, d, segLen * (0.75 + rng() * 0.25), sr);
+      }
+      p.addScaledVector(d, segLen);
+      topY = Math.max(topY, p.y);
+      r *= 0.72;
+    }
+    if (depth >= maxDepth) return;
+
+    const kids = depth === 0 ? 3 + Math.floor(rng() * 2) : 2 + (rng() < 0.45 ? 1 : 0);
+    const az0 = rng() * Math.PI * 2;
+    for (let k = 0; k < kids; k++) {
+      const az = az0 + k * 2.39996 + (rng() - 0.5) * 0.5; // golden-angle spread
+      const tilt = (depth === 0 ? 0.35 : 0.45) + rng() * 0.45;
+      const nd = deviate(d, az, tilt);
+      const nl = len * (depth === 0 ? 1.0 + rng() * 0.2 : 0.58 + rng() * 0.18);
+      branch(p, nd, nl, r * 0.9, depth + 1);
+    }
+    // snow gathered in the fork
+    if (depth <= 1 && rng() < 0.4 + snowiness * 0.5) {
+      const cr = Math.max(0.12, r * (2.0 + rng() * 0.8));
+      local.clumps.push(new THREE.Matrix4().compose(
+        p.clone().addScaledVector(UP, r * 0.6),
+        new THREE.Quaternion().setFromAxisAngle(UP, rng() * Math.PI),
+        new THREE.Vector3(cr, cr * 0.55, cr)
+      ));
+    }
+  }
+
+  branch(new THREE.Vector3(0, -0.2, 0), lean, height * 0.4, height * 0.03, 0);
+
+  const f = height / Math.max(topY, 0.001); // keep each tree at its intended height
+  const place = new THREE.Matrix4().compose(position, spin, new THREE.Vector3(f, f, f));
+  for (const key of ['bark', 'snow', 'clumps']) {
+    for (const m of local[key]) out[key].push(m.premultiply(place));
+  }
+}
+
+// ===== world/ground.js =====
+
+
+
+// Snowfield: flat around the rink, gently rolling further out, plus snow
+// drifts banked against the rink boards and around tree bases.
+
+function heightAt(x, z) {
+  const e = Math.sqrt((x / RINK.rx) ** 2 + (z / RINK.rz) ** 2);
+  const t = THREE.MathUtils.smoothstep(e, 1.15, 2.3);
+  const h = Math.sin(x * 0.08) * Math.cos(z * 0.07) + Math.sin(x * 0.031 + z * 0.043) * 1.4 + 1.2;
+  return t * Math.max(0, h) * 0.9;
+}
+
+function createGround({ glow }) {
+  const group = new THREE.Group();
+  group.name = 'Snowfield';
+
+  const geo = new THREE.PlaneGeometry(340, 340, 96, 96);
+  geo.rotateX(-Math.PI / 2);
+  const p = geo.attributes.position;
+  for (let i = 0; i < p.count; i++) p.setY(i, heightAt(p.getX(i), p.getZ(i)));
+  geo.computeVertexNormals();
+
+  const snowMat = glow.patch(new THREE.MeshStandardMaterial({ color: PALETTE.snow, roughness: 0.95 }), 1);
+  const ground = new THREE.Mesh(geo, snowMat);
+  ground.name = 'SnowGround';
+  group.add(ground);
+
+  function addDrifts(treePlacements) {
+    const rng = mulberry32(31);
+    const mats = [];
+    const m = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new THREE.Vector3(), v = new THREE.Vector3();
+    const up = new THREE.Vector3(0, 1, 0);
+    const outer = RINK.boardThickness;
+
+    // banked snow along the outside of the boards
+    const N = 64;
+    for (let i = 0; i < N; i++) {
+      const a = (i / N) * Math.PI * 2 + rng() * 0.05;
+      const off = outer + 0.6 + rng() * 1.2;
+      const x = (RINK.rx + off) * Math.cos(a);
+      const z = (RINK.rz + off) * Math.sin(a);
+      // align the drift's long (local x) axis with the ellipse tangent
+      const tangent = Math.atan2(-RINK.rz * Math.cos(a), -RINK.rx * Math.sin(a));
+      q.setFromAxisAngle(up, tangent);
+      v.set(x, -0.12, z);
+      s.set(2.2 + rng() * 1.6, 0.55 + rng() * 0.4, 1.1 + rng() * 0.8);
+      mats.push(m.compose(v, q, s).clone());
+    }
+    // mounds hugging tree bases
+    for (const t of treePlacements) {
+      for (let k = 0; k < 2; k++) {
+        const a = rng() * Math.PI * 2;
+        const r = t.radius * (0.55 + rng() * 0.3);
+        v.set(t.position.x + Math.cos(a) * r, t.position.y - 0.1, t.position.z + Math.sin(a) * r);
+        q.setFromAxisAngle(up, rng() * Math.PI);
+        s.set(1.6 + rng() * 1.6, 0.5 + rng() * 0.5, 1.2 + rng() * 1.2);
+        mats.push(m.compose(v, q, s).clone());
+      }
+    }
+
+    const driftGeo = new THREE.SphereGeometry(1, 14, 7, 0, Math.PI * 2, 0, Math.PI / 2);
+    const drifts = new THREE.InstancedMesh(driftGeo, snowMat, mats.length);
+    mats.forEach((mx, i) => drifts.setMatrixAt(i, mx));
+    drifts.instanceMatrix.needsUpdate = true;
+    drifts.computeBoundingSphere();
+    drifts.name = 'SnowDrifts';
+    group.add(drifts);
+  }
+
+  return { group, addDrifts, material: snowMat };
+}
+
+// ===== world/iceRink.js =====
+
+
+
+
+// Elliptical outdoor ice. No real-time reflection pass: one lightweight
+// shader draws everything —
+//  - cold pale blue / silver ice with inner grain, frost and fine fractures
+//  - skate scratches (several directions + long arcs around the tree)
+//  - micro bumps that break up highlights so it never looks like a mirror
+//  - an analytic reflection of the central tree's lights: a long, soft amber
+//    streak that is strongest near the tree and fades with distance
+//  - a broad warm sheen, a faint moon glint and grazing-angle sky reflection
+
+const treeBase = RINK.iceY + 0.35;
+
+const IceShader = {
+  uniforms: {
+    uRadii: { value: new THREE.Vector2(RINK.rx, RINK.rz) },
+    uWarm: { value: new THREE.Color(1.0, 0.45, 0.14) },
+    uIceDeep: { value: new THREE.Color().setRGB(0.012, 0.022, 0.038) },
+    uIceSilver: { value: new THREE.Color().setRGB(0.045, 0.06, 0.078) },
+    uFrost: { value: new THREE.Color().setRGB(0.07, 0.085, 0.11) },
+    uSky: { value: new THREE.Color().setRGB(0.03, 0.05, 0.09) },
+    uMoonDir: { value: new THREE.Vector3(...MOON_DIR).normalize() },
+    uMoonCol: { value: new THREE.Color().setRGB(0.5, 0.6, 0.8) },
+    // x: lowest bulbs, y: tree top, z: tree radius
+    uTree: { value: new THREE.Vector3(treeBase + CENTER_TREE.height * 0.1, treeBase + CENTER_TREE.height, CENTER_TREE.radius) },
+    uTreeLight: { value: new THREE.Vector3(0, 10, 6) },
+    uReflect: { value: 1.6 },
+    uPool: { value: 0.9 },
+  },
+  vertexShader: /* glsl */ `
+    varying vec3 vWorld;
+    #include <common>
+    #include <logdepthbuf_pars_vertex>
+    void main() {
+      vec4 wp = modelMatrix * vec4( position, 1.0 );
+      vWorld = wp.xyz;
+      gl_Position = projectionMatrix * viewMatrix * wp;
+      #include <logdepthbuf_vertex>
+    }`,
+  fragmentShader: /* glsl */ `
+    #ifndef ICE_OCTAVES
+    #define ICE_OCTAVES 4
+    #endif
+    uniform vec2 uRadii;
+    uniform vec3 uWarm;
+    uniform vec3 uIceDeep;
+    uniform vec3 uIceSilver;
+    uniform vec3 uFrost;
+    uniform vec3 uSky;
+    uniform vec3 uMoonDir;
+    uniform vec3 uMoonCol;
+    uniform vec3 uTree;
+    uniform vec3 uTreeLight;
+    uniform float uReflect;
+    uniform float uPool;
+    varying vec3 vWorld;
+    #include <logdepthbuf_pars_fragment>
+
+    float hash( vec2 p ) { return fract( sin( dot( p, vec2( 127.1, 311.7 ) ) ) * 43758.5453 ); }
+    float noise( vec2 p ) {
+      vec2 i = floor( p ), f = fract( p );
+      f = f * f * ( 3.0 - 2.0 * f );
+      return mix( mix( hash( i ), hash( i + vec2( 1.0, 0.0 ) ), f.x ),
+                  mix( hash( i + vec2( 0.0, 1.0 ) ), hash( i + vec2( 1.0, 1.0 ) ), f.x ), f.y );
+    }
+    float fbm( vec2 p ) {
+      float v = 0.0, a = 0.5;
+      for ( int i = 0; i < ICE_OCTAVES; i ++ ) { v += a * noise( p ); p = p * 2.03 + 7.1; a *= 0.5; }
+      return v;
+    }
+    // thin, slightly curved line segments: high frequency across, low along
+    float streaks( vec2 p, float ang, float across, float along, float thr ) {
+      float c = cos( ang ), s = sin( ang );
+      vec2 q = vec2( c * p.x - s * p.y, s * p.x + c * p.y );
+      q.y += noise( q * 0.08 ) * 3.0;
+      float n = noise( vec2( q.x * along, q.y * across ) );
+      float seg = smoothstep( 0.45, 0.75, noise( vec2( q.x * 0.07, q.y * 0.9 ) + 3.7 ) );
+      return smoothstep( thr, 1.0, n ) * seg;
+    }
+
+    void main() {
+      #include <logdepthbuf_fragment>
+      vec2 p = vWorld.xz;
+      float d = length( p / uRadii );                 // 0 centre → 1 boards
+
+      // inner grain, milky frost, fine fractures
+      float g1 = fbm( p * 0.22 );
+      float g2 = fbm( p * 1.7 + 11.0 );
+      float crack = 1.0 - smoothstep( 0.0, 0.035, abs( noise( p * 0.45 ) - 0.5 ) );
+      crack *= smoothstep( 0.35, 0.7, noise( p * 0.13 + 5.0 ) );
+
+      // skate marks
+      float sc = streaks( p, 0.3, 22.0, 0.35, 0.86 ) * 0.7
+               + streaks( p, 1.9, 26.0, 0.30, 0.88 ) * 0.55
+               + streaks( p, -0.8, 30.0, 0.40, 0.90 ) * 0.45;
+      float er = length( p * vec2( 1.0, uRadii.x / uRadii.y ) );
+      float arcs = smoothstep( 0.84, 1.0, noise( vec2( er * 7.0 + noise( p * 0.25 ) * 2.5, ( p.x + p.y ) * 0.05 ) ) );
+      arcs *= smoothstep( 0.3, 0.6, noise( p * 0.09 + 2.0 ) ) * smoothstep( 0.25, 0.4, d );
+      sc = clamp( sc + arcs * 0.8, 0.0, 1.0 ) * ( 0.5 + 0.5 * smoothstep( 0.35, 0.95, d ) );
+
+      // micro bumps + gentle undulation → perturbed normal
+      float e = 0.15;
+      float h0 = noise( p * 2.2 );
+      float hx = noise( ( p + vec2( e, 0.0 ) ) * 2.2 );
+      float hz = noise( ( p + vec2( 0.0, e ) ) * 2.2 );
+      vec3 N = normalize( vec3( ( h0 - hx ) * 0.10 + ( g2 - 0.5 ) * 0.03, 1.0, ( h0 - hz ) * 0.10 + ( g1 - 0.5 ) * 0.03 ) );
+
+      vec3 V = normalize( cameraPosition - vWorld );
+      float cosT = clamp( dot( N, V ), 0.0, 1.0 );
+      float fres = 0.018 + 0.982 * pow( 1.0 - cosT, 5.0 );
+
+      // base ice colour
+      vec3 col = mix( uIceDeep, uIceSilver, smoothstep( 0.25, 0.85, g1 ) * 0.7 + g2 * 0.15 );
+      col *= 1.0 - crack * 0.25;
+      col += uIceSilver * crack * 0.12 * ( 1.0 - d * 0.5 );
+      float frost = clamp( smoothstep( 0.8, 1.0, d ) * ( 0.5 + 0.5 * g2 ) + smoothstep( 0.62, 0.9, g2 ) * 0.25, 0.0, 1.0 );
+      col = mix( col, uFrost * ( 0.8 + 0.4 * g1 ), frost * 0.55 );
+      col += uFrost * sc * 0.35;
+
+      // analytic reflection of the tree's lights (soft, elongated, fades with distance)
+      vec3 R = reflect( -V, N );
+      float refl = 0.0;
+      vec2 Rh = R.xz;
+      float rh2 = dot( Rh, Rh );
+      if ( R.y > 0.0 && rh2 > 1e-6 ) {
+        float t = - dot( p, Rh ) / rh2;               // distance along the reflected ray
+        if ( t > 0.0 ) {
+          float dl = length( p + Rh * t );            // how far the ray misses the tree axis
+          float h = vWorld.y + R.y * t;               // height at which it passes the tree
+          float hn = clamp( ( h - uTree.x ) / ( uTree.y - uTree.x ), 0.0, 1.0 );
+          float coneR = uTree.z * ( 1.0 - hn );
+          float sigma = 0.9 + t * 0.03;
+          float lateral = exp( - pow( max( dl - coneR * 0.8, 0.0 ) / sigma, 2.0 ) );
+          float elong = 3.0 + t * 0.25;
+          float vert = smoothstep( uTree.x - 2.0, uTree.x + 1.0, h )
+                     * ( 1.0 - smoothstep( uTree.y + 1.2, uTree.y + 1.2 + elong, h ) );
+          float prof = mix( 0.35, 1.0, pow( hn, 1.4 ) );           // brighter toward the top
+          float star = exp( - pow( ( h - uTree.y - 0.9 ) / ( 1.0 + t * 0.05 ), 2.0 ) )
+                     * exp( - dl * dl / ( sigma * sigma * 2.0 ) ) * 1.3;
+          refl = ( lateral * vert * prof + star ) / ( 1.0 + t * 0.025 );
+        }
+      }
+      refl *= ( 0.7 + 0.6 * h0 ) * ( 1.0 - sc * 0.4 );   // glints, broken up by scratches
+      col += uWarm * refl * uReflect * mix( 0.45, 1.0, fres );
+
+      // warm spill from the bulbs onto the ice, strongest at the tree
+      float rT = length( p );
+      float pool = exp( - pow( rT / ( uTree.z * 2.0 ), 1.5 ) ) * 0.32 + exp( - rT / ( uTree.z * 0.9 ) ) * 0.18;
+      col += uWarm * pool * uPool * ( 0.75 + 0.5 * frost + 0.3 * sc );
+
+      // broad glossy sheen from the tree light
+      vec3 L = normalize( uTreeLight - vWorld );
+      vec2 lp = uTreeLight.xz - p;
+      float sheen = pow( max( dot( N, normalize( L + V ) ), 0.0 ), 90.0 ) * 0.6 / ( 1.0 + dot( lp, lp ) * 0.004 );
+      col += uWarm * sheen * ( 1.0 - sc * 0.5 );
+
+      // cool moon glint + night sky at grazing angles
+      col += uMoonCol * pow( max( dot( N, normalize( uMoonDir + V ) ), 0.0 ), 350.0 ) * 0.35;
+      col += uSky * fres * ( 1.0 - frost * 0.5 );
+
+      // faint mirrored glow of the rail lights near the boards
+      col += uWarm * smoothstep( 0.88, 1.0, d ) * 0.05 * ( 0.6 + 0.4 * h0 );
+
+      gl_FragColor = vec4( col, 1.0 );
+      #include <tonemapping_fragment>
+      #include <colorspace_fragment>
+    }`,
+};
+
+function createIceRink({ glow, bulbs }) {
+  const group = new THREE.Group();
+  group.name = 'IceRink';
+
+  // --- ice ------------------------------------------------------------------
+  const shape = new THREE.Shape();
+  shape.absellipse(0, 0, RINK.rx, RINK.rz, 0, Math.PI * 2, false, 0);
+  const iceGeo = new THREE.ShapeGeometry(shape, 96);
+  const iceMat = new THREE.ShaderMaterial({
+    name: 'WinterIce',
+    uniforms: THREE.UniformsUtils.clone(IceShader.uniforms),
+    vertexShader: IceShader.vertexShader,
+    fragmentShader: IceShader.fragmentShader,
+    defines: { ICE_OCTAVES: QUALITY.iceOctaves },
+    fog: false,
+  });
+  const ice = new THREE.Mesh(iceGeo, iceMat);
+  ice.rotation.x = -Math.PI / 2;
+  ice.position.y = RINK.iceY;
+  ice.name = 'Ice';
+  group.add(ice);
+
+  // --- boards ---------------------------------------------------------------
+  const t = RINK.boardThickness;
+  const ring = new THREE.Shape();
+  ring.absellipse(0, 0, RINK.rx + t, RINK.rz + t, 0, Math.PI * 2, false, 0);
+  const hole = new THREE.Path();
+  hole.absellipse(0, 0, RINK.rx, RINK.rz, 0, Math.PI * 2, true, 0);
+  ring.holes.push(hole);
+  const boardGeo = new THREE.ExtrudeGeometry(ring, { depth: RINK.boardHeight, bevelEnabled: false, curveSegments: 96 });
+  boardGeo.rotateX(-Math.PI / 2);
+  const boardMat = glow.patch(new THREE.MeshStandardMaterial({ color: PALETTE.boards, roughness: 0.55 }), 1);
+  const boards = new THREE.Mesh(boardGeo, boardMat);
+  boards.name = 'RinkBoards';
+  group.add(boards);
+
+  // --- warm string lights along the top rail --------------------------------
+  const rng = mulberry32(9);
+  const a = RINK.rx + t / 2, b = RINK.rz + t / 2;
+  const perimeter = Math.PI * (3 * (a + b) - Math.sqrt((3 * a + b) * (a + 3 * b)));
+  const count = Math.floor(perimeter / 0.55);
+  for (let i = 0; i < count; i++) {
+    const th = (i / count) * Math.PI * 2;
+    const sag = 0.06 * Math.abs(Math.sin(i * 0.5 * Math.PI)); // tiny scallop between posts
+    const c = warmBulbColor(rng, PALETTE, LIGHTING.bulbIntensity);
+    bulbs.add(a * Math.cos(th), RINK.boardHeight + 0.1 - sag, b * Math.sin(th), 0.2, c[0] * 0.65, c[1] * 0.65, c[2] * 0.65); // dimmer than the tree
+  }
+
+  return {
+    group,
+    ice,
+    material: iceMat,
+    setSize() {}, // nothing resolution-dependent any more (no reflection render target)
+  };
+}
+
+// ===== world/christmasTree.js =====
+
+
+
+
+
+/**
+ * Strands hang from the top of the tree and wind gently down to the bottom.
+ * emit(x, y, z, heightNorm) is called once per bulb (local space).
+ */
+function wrapStrandsFromTop(desc, rng, { strands, bulbSpacing, strandTwist }, emit) {
+  const top = desc.height * 0.965;
+  const bottom = desc.trunkH + 0.4;
+  const twist = strandTwist * Math.PI;
+  const at = (s, a0, y) => {
+    const u = 1 - (y - bottom) / (top - bottom); // 0 at top → 1 at bottom
+    const a = a0 + u * twist + 0.05 * Math.sin(y * 1.3 + s * 2.0);
+    const r = desc.envelope(y) + 0.13;
+    return [Math.cos(a) * r, y, Math.sin(a) * r];
+  };
+  for (let s = 0; s < strands; s++) {
+    const a0 = (s / strands) * Math.PI * 2 + (rng() - 0.5) * 0.15;
+    let prev = at(s, a0, top);
+    let acc = bulbSpacing; // emit the first bulb right at the top
+    for (let y = top; y >= bottom; y -= 0.02) {
+      const p = at(s, a0, y);
+      acc += Math.hypot(p[0] - prev[0], p[1] - prev[1], p[2] - prev[2]);
+      prev = p;
+      if (acc < bulbSpacing) continue;
+      acc = 0;
+      emit(p[0], p[1], p[2], (y - bottom) / (top - bottom));
+    }
+  }
+}
+
+// The visual heart of the scene: a huge, full tree in the middle of the ice,
+// wrapped in ~1700 warm bulbs, a glowing star, on a small snow island.
+
+function createChristmasTree({ glow, bulbs }) {
+  const rng = mulberry32(1225);
+  const group = new THREE.Group();
+  group.name = 'ChristmasTree';
+
+  const { height, radius, tiers } = CENTER_TREE;
+  const base = new THREE.Vector3(0, RINK.iceY + 0.35, 0);
+  const desc = describeFir({ height, radius, tiers, capCover: 0.44 }); // snow resting on every tier
+  const out = { foliage: [], caps: [], trunks: [] };
+  pushFirInstances(desc, base, 0.3, out);
+
+  // Faint warm self-illumination so the tree reads as lit from within.
+  const foliageMat = glow.patch(
+    new THREE.MeshStandardMaterial({ color: PALETTE.foliageCenter, roughness: 0.85, emissive: 0x1c0a03, emissiveIntensity: 1 }),
+    1.4
+  );
+  const snowMat = glow.patch(new THREE.MeshStandardMaterial({ color: PALETTE.snow, roughness: 0.85 }), 1);
+  const trunkMat = new THREE.MeshStandardMaterial({ color: PALETTE.trunk, roughness: 1 });
+  group.add(toInstancedMesh(createFoliageGeometry(), foliageMat, out.foliage, 'TreeFoliage'));
+  group.add(toInstancedMesh(createSnowCapGeometry(), snowMat, out.caps, 'TreeSnow'));
+  group.add(toInstancedMesh(createTrunkGeometry(), trunkMat, out.trunks, 'TreeTrunk'));
+
+  // 7 light strands that start at the top and run down the tree, with wide
+  // dark gaps between them. Brightest at the top, softer toward the bottom,
+  // each bulb slightly different.
+  let bulbCount = 0;
+  wrapStrandsFromTop(desc, rng, CENTER_TREE, (x, y, z, hn) => {
+    const c = warmBulbColor(rng, PALETTE, [1, 1]);
+    const k = (1.5 + 3.0 * Math.pow(hn, 1.6)) * (0.72 + rng() * 0.45);
+    bulbs.add(x, base.y + y, z, 0.2 + 0.05 * hn, c[0] * k, c[1] * k, c[2] * k);
+    bulbCount++;
+  });
+  // a small bright cluster right under the star: where the light "begins"
+  for (let i = 0; i < 9; i++) {
+    const a = rng() * Math.PI * 2, y = height * (0.94 + rng() * 0.05);
+    const r = desc.envelope(y) + 0.1;
+    bulbs.add(Math.cos(a) * r, base.y + y, Math.sin(a) * r, 0.26, 4.6, 2.2, 0.7);
+  }
+
+  // --- star -------------------------------------------------------------------
+  const shape = new THREE.Shape();
+  for (let i = 0; i < 10; i++) {
+    const a = (i / 10) * Math.PI * 2 + Math.PI / 2;
+    const r = i % 2 === 0 ? 1.15 : 0.47;
+    if (i === 0) shape.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+    else shape.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+  }
+  shape.closePath();
+  const starGeo = new THREE.ExtrudeGeometry(shape, { depth: 0.3, bevelEnabled: true, bevelSize: 0.06, bevelThickness: 0.06, bevelSegments: 1 });
+  starGeo.center();
+  const star = new THREE.Mesh(starGeo, new THREE.MeshBasicMaterial({ color: new THREE.Color(4.5, 2.6, 1.0), fog: false }));
+  star.position.set(0, base.y + height + 0.9, 0);
+  group.add(star);
+  bulbs.add(0, star.position.y, 0, 4.2, 1.6, 0.85, 0.35); // soft halo around the star
+
+  // --- snow island the tree stands on ----------------------------------------
+  const island = new THREE.Mesh(
+    new THREE.SphereGeometry(1, 28, 8, 0, Math.PI * 2, 0, Math.PI / 2),
+    snowMat
+  );
+  island.scale.set(ISLAND_RADIUS, 0.85, ISLAND_RADIUS);
+  island.position.y = RINK.iceY - 0.05;
+  island.name = 'SnowIsland';
+  group.add(island);
+
+  // warm bounce from the bulbs onto the tree's own snow & island (top strongest)
+  glow.add(0, 2.5, 0, 8.5, 0.2);
+  glow.add(0, 8.0, 0, 6.5, 0.22);
+  glow.add(0, 14.5, 0, 4.5, 0.3);
+
+  return {
+    group,
+    star,
+    bulbCount,
+    emitter: { base: base.y + desc.trunkH, top: base.y + height, radius },
+    update(t) {
+      star.rotation.y = t * 0.35;
+    },
+  };
+}
+
+// ===== world/forest.js =====
+
+
+
+
+
+// 22 bare, snow-laden winter trees ring the rink. No string lights on them —
+// only a few small standalone lanterns glow here and there between trees.
+
+/**
+ * Tree positions/heights exactly as in the previous version of the scene.
+ * The original generator consumed random numbers while wrapping lights, so
+ * that consumption is replayed (without creating any bulbs) to keep the
+ * layout identical.
+ */
+function forestLayout() {
+  const rng = mulberry32(FOREST.seed);
+  const [gapA, gapB] = FOREST.frontGapDeg.map(THREE.MathUtils.degToRad);
+  const arcStart = gapB;
+  const arcLen = Math.PI * 2 - (gapB - gapA);
+  const placements = [];
+  for (let i = 0; i < FOREST.count; i++) {
+    const theta = arcStart + ((i + 0.5) / FOREST.count) * arcLen + (rng() - 0.5) * 0.12;
+    const back = Math.max(0, -Math.sin(theta));
+    const height = 7.5 + rng() * 3.5 + back * 4.5 + (i % 3 === 0 ? 2 : 0);
+    const radius = height * (0.34 + rng() * 0.06);
+    const n = new THREE.Vector2(Math.cos(theta) / RINK.rx, Math.sin(theta) / RINK.rz).normalize();
+    const d = radius + 2.2 + rng() * 10 + back * 5;
+    const x = (RINK.rx + 0.4) * Math.cos(theta) + n.x * d;
+    const z = (RINK.rz + 0.4) * Math.sin(theta) + n.y * d;
+    const rotY = rng() * Math.PI * 2;
+    placements.push({ x, z, height, radius, theta, rotY });
+    // replay of the old light wrapping (2 extra draws per bulb for colour)
+    const desc = describeFir({ height, radius, tiers: height > 11 ? 5 : 4, capCover: 0.6 });
+    wrapLights(desc, Math.round(1.25 * height * height), rng, () => { rng(); rng(); },
+      { strands: 2, turns: 4 + height * 0.25, offset: 0.1, scatter: 0.35 });
+  }
+  return placements;
+}
+
+function createForest({ glow, bulbs, heightAt }) {
+  const group = new THREE.Group();
+  group.name = 'WinterForest';
+
+  const out = { bark: [], snow: [], clumps: [] };
+  const placements = forestLayout().map((p, i) => {
+    const position = new THREE.Vector3(p.x, heightAt(p.x, p.z) - 0.1, p.z);
+    const rng = mulberry32(FOREST.seed * 7 + i * 101);
+    growDeciduousTree(rng, { position, height: p.height, rotY: p.rotY, snowiness: 0.35 + rng() * 0.65 }, out);
+    return { position, height: p.height, radius: p.radius, theta: p.theta };
+  });
+
+  const barkMat = glow.patch(new THREE.MeshStandardMaterial({ color: PALETTE.bark, roughness: 1 }), 1);
+  const snowMat = glow.patch(new THREE.MeshStandardMaterial({ color: PALETTE.snow, roughness: 0.85 }), 1);
+  const add = (geo, mat, list, name) => {
+    const mesh = new THREE.InstancedMesh(geo, mat, list.length);
+    list.forEach((m, i) => mesh.setMatrixAt(i, m));
+    mesh.instanceMatrix.needsUpdate = true;
+    mesh.computeBoundingSphere();
+    mesh.name = name;
+    group.add(mesh);
+  };
+  add(createBranchGeometry(), barkMat, out.bark, 'ForestBranches');
+  add(createSnowRidgeGeometry(), snowMat, out.snow, 'ForestBranchSnow');
+  add(createSnowClumpGeometry(), snowMat, out.clumps, 'ForestForkSnow');
+
+  // --- sparse, irregular lanterns in some gaps between trees ----------------
+  const L = LIGHTING.lanterns;
+  const rng = mulberry32(404);
+  const sorted = [...placements].sort((a, b) => a.theta - b.theta);
+  const posts = [];
+  for (let i = 0; i < sorted.length - 1 && posts.length < L.max; i++) {
+    if (rng() > L.chance) continue;
+    const a = sorted[i].position, b = sorted[i + 1].position;
+    const t = 0.3 + rng() * 0.4;
+    const x = a.x + (b.x - a.x) * t + (rng() - 0.5) * 3;
+    const z = a.z + (b.z - a.z) * t + (rng() - 0.5) * 3;
+    const y = heightAt(x, z);
+    const h = 0.9 + rng() * 1.3;
+    posts.push(new THREE.Matrix4().compose(new THREE.Vector3(x, y - 0.1, z), new THREE.Quaternion(), new THREE.Vector3(0.06, h + 0.1, 0.06)));
+    const k = L.intensity[0] + rng() * (L.intensity[1] - L.intensity[0]); // far dimmer than the tree
+    bulbs.add(x, y + h + 0.08, z, 0.34, PALETTE.bulbB[0] * k, PALETTE.bulbB[1] * k, PALETTE.bulbB[2] * k);
+    glow.add(x, y + h, z, L.glowRadius, L.glowStrength); // faint warmth on nearby snowy branches only
+  }
+  if (posts.length) {
+    add(createBranchGeometry(), new THREE.MeshStandardMaterial({ color: 0x1d1612, roughness: 1 }), posts, 'LanternPosts');
+  }
+
+  return { group, placements, lanternCount: posts.length };
+}
+
+// ===== world/lights.js =====
+
+
+
+// Only 4 real point lights in the whole scene (+ hemisphere + moon), all on the central tree.
+// Thousands of bulbs are emissive sprites; these lights just carry their
+// combined warmth onto snow, boards and branches.
+
+function createLights({ moonDir }) {
+  const group = new THREE.Group();
+  group.name = 'Lighting';
+
+  const { hemi, moon, treeRing, treeTop } = LIGHTING;
+
+  // cold, dim ambient from the night sky
+  group.add(new THREE.HemisphereLight(hemi.sky, hemi.ground, hemi.intensity));
+
+  // faint cool moonlight for rim / shape on snow
+  const moonLight = new THREE.DirectionalLight(moon.color, moon.intensity);
+  moonLight.position.copy(moonDir).multiplyScalar(100).setY(60);
+  group.add(moonLight);
+
+  // warm lights around the central tree (outside the foliage so they light its surface)
+  const pointLights = [];
+  for (let i = 0; i < treeRing.count; i++) {
+    const a = (i / treeRing.count) * Math.PI * 2 + Math.PI / 2;
+    const l = new THREE.PointLight(PALETTE.warmLight, treeRing.intensity, treeRing.distance, treeRing.decay);
+    l.position.set(Math.cos(a) * treeRing.radius, treeRing.y, Math.sin(a) * treeRing.radius);
+    group.add(l);
+    pointLights.push(l);
+  }
+  const top = new THREE.PointLight(0xffa155, treeTop.intensity, treeTop.distance, treeTop.decay);
+  top.position.set(0, treeTop.y, treeTop.z);
+  group.add(top);
+  pointLights.push(top);
+
+  // The forest gets no real lights: it stays dark and blue, with only the
+  // lanterns' emissive sprites + faint shader glow (see forest.js).
+
+  const base = pointLights.map((l) => l.intensity);
+  return {
+    group,
+    pointLights,
+    // very slight candle-like breathing so the light feels alive
+    update(t) {
+      pointLights.forEach((l, i) => {
+        l.intensity = base[i] * (0.94 + 0.04 * Math.sin(t * 1.7 + i * 2.1) + 0.02 * Math.sin(t * 4.3 + i));
+      });
+    },
+  };
+}
+
+// ===== world/snowfall.js =====
+
+
+
+// Slow falling snow, animated entirely on the GPU (one draw call).
+//  - per-flake size, speed and sway
+//  - near flakes larger, far flakes smaller and fainter (depth)
+//  - the volume wraps around the camera: flakes that fall out re-enter at the top
+//  - flakes near the central tree pick up a faint amber tint and the odd glint
+
+function createSnowfall({ count = 1400, area = 140, height = 40, tree } = {}) {
+  const rng = mulberry32(5);
+  const pos = new Float32Array(count * 3);
+  const phase = new Float32Array(count);
+  const speed = new Float32Array(count);
+  const size = new Float32Array(count);
+  const sway = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
+    pos[i * 3] = rng() * area;
+    pos[i * 3 + 1] = rng() * height;
+    pos[i * 3 + 2] = rng() * area;
+    phase[i] = rng() * Math.PI * 2;
+    speed[i] = 0.55 + rng() * 0.9;
+    size[i] = 0.08 + Math.pow(rng(), 2) * 0.14;
+    sway[i] = 0.5 + rng();
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('aPhase', new THREE.BufferAttribute(phase, 1));
+  geo.setAttribute('aSpeed', new THREE.BufferAttribute(speed, 1));
+  geo.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
+  geo.setAttribute('aSway', new THREE.BufferAttribute(sway, 1));
+
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      uTime: { value: 0 },
+      uHeight: { value: height },
+      uArea: { value: area },
+      uSpread: { value: 1 },
+      uCenter: { value: new THREE.Vector2() },
+      uViewportH: { value: 1080 },
+      uFade: { value: 1 },
+      // x: tree top height, y: tree radius
+      uTree: { value: new THREE.Vector2(tree ? tree.top : 19.4, tree ? tree.radius : 6.4) },
+    },
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    fog: false,
+    vertexShader: /* glsl */ `
+      uniform float uTime; uniform float uHeight; uniform float uArea; uniform float uSpread;
+      uniform vec2 uCenter; uniform float uViewportH; uniform float uFade; uniform vec2 uTree;
+      attribute float aPhase; attribute float aSpeed; attribute float aSize; attribute float aSway;
+      varying float vA;
+      varying vec3 vCol;
+      void main() {
+        vec3 p = position;
+        p.y = mod( p.y - uTime * aSpeed, uHeight );
+        p.xz *= uSpread;                               // wider volume on far (portrait) cameras
+        float gust = 0.6 + 0.4 * sin( uTime * 0.11 + p.y * 0.05 );
+        p.x += sin( uTime * 0.3 * aSway + aPhase ) * 1.1 * aSway * gust + uTime * 0.25;
+        p.z += cos( uTime * 0.23 + aPhase * 1.7 ) * 0.7 * aSway;
+        // wrap the flake volume around uCenter so there is always snow in view
+        p.xz = uCenter + mod( p.xz - uCenter + 0.5 * uArea, uArea ) - 0.5 * uArea;
+
+        vec4 mv = modelViewMatrix * vec4( p, 1.0 );
+        gl_Position = projectionMatrix * mv;
+        float dist = max( - mv.z, 0.1 );
+        gl_PointSize = clamp( aSize * uViewportH * projectionMatrix[ 1 ][ 1 ] * 0.5 / dist, 1.0, 16.0 );
+        float near = smoothstep( 1.5, 5.0, dist );   // no giant blobs on the lens
+        vA = 0.34 * exp( - pow( dist * 0.012 * uFade, 2.0 ) ) * smoothstep( 0.0, 2.0, p.y ) * near;
+
+        // amber tint only close to the central tree
+        float hn = clamp( p.y / uTree.x, 0.0, 1.0 );
+        float dr = max( length( p.xz ) - ( uTree.y * ( 1.0 - hn ) + 0.5 ), 0.0 );
+        float warm = exp( - dr * dr / 18.0 ) * ( 1.0 - smoothstep( uTree.x, uTree.x + 4.0, p.y ) ) * ( 0.6 + 0.4 * hn );
+        float glint = pow( 0.5 + 0.5 * sin( uTime * 5.0 + aPhase * 37.0 ), 12.0 );
+        vCol = mix( vec3( 0.72, 0.80, 0.95 ), vec3( 1.0, 0.66, 0.34 ), warm * 0.85 )
+             * ( 1.0 + warm * ( 0.8 + 1.4 * glint ) );
+      }`,
+    fragmentShader: /* glsl */ `
+      varying float vA;
+      varying vec3 vCol;
+      void main() {
+        float r = length( gl_PointCoord - 0.5 ) * 2.0;
+        float a = smoothstep( 1.0, 0.2, r ) * vA;
+        gl_FragColor = vec4( vCol * a, 1.0 );
+      }`,
+  });
+  const points = new THREE.Points(geo, mat);
+  points.frustumCulled = false;
+  points.name = 'Snowfall';
+
+  return {
+    points,
+    update(t, camera) {
+      mat.uniforms.uTime.value = t;
+      // centre the snow volume between the camera and the rink
+      if (camera) mat.uniforms.uCenter.value.set(camera.position.x * 0.55, camera.position.z * 0.55);
+    },
+    setViewportHeight(h) {
+      mat.uniforms.uViewportH.value = h;
+    },
+    setDistanceScale(s) {
+      mat.uniforms.uFade.value = 1 / s;
+      const spread = Math.max(1, s * 0.9);
+      mat.uniforms.uSpread.value = spread;
+      mat.uniforms.uArea.value = area * spread;
+    },
+  };
+}
+
+// ===== world/index.js =====
+
+
+
+
+
+
+
+
+
+
+
+
+/**
+ * Magical Winter Forest Ice Rink — background + lighting only.
+ * Characters, movement and input are NOT touched by this module.
+ *
+ *   const world = createWinterWorld({ scene, renderer });
+ *   // in your loop:   world.update(elapsedSeconds, camera);
+ *   // on resize:      world.setSize(drawingBufferWidth, drawingBufferHeight, pixelRatio);
+ *   //                 world.setDistanceScale(cinematicCamera.fit(aspect));
+ */
+function createWinterWorld({ scene, renderer }) {
+  scene.background = new THREE.Color(PALETTE.fog);
+  scene.fog = new THREE.FogExp2(PALETTE.fog, PALETTE.fogDensity);
+
+  const root = new THREE.Group();
+  root.name = 'WinterForestIceRink';
+  scene.add(root);
+
+  const glow = createWarmGlow();
+  const bulbs = new BulbField();
+
+  const sky = createSky();
+  const ground = createGround({ glow });
+  const rink = createIceRink({ glow, bulbs });
+  const tree = createChristmasTree({ glow, bulbs });
+  const forest = createForest({ glow, bulbs, heightAt });
+  ground.addDrifts(forest.placements);
+  const lights = createLights({ moonDir: sky.moonDir });
+  const bulbPoints = bulbs.build();
+  const snow = createSnowfall({ count: QUALITY.snow, tree: tree.emitter });
+
+  root.add(sky.group, ground.group, rink.group, tree.group, forest.group, lights.group, bulbPoints, snow.points);
+
+  function setSize(w, h, pixelRatio = 1) {
+    bulbs.material.uniforms.uViewportH.value = h;
+    snow.setViewportHeight(h);
+    sky.setPixelRatio(pixelRatio);
+    rink.setSize(w, h);
+  }
+  const buf = renderer.getDrawingBufferSize(new THREE.Vector2());
+  setSize(buf.x, buf.y, renderer.getPixelRatio());
+
+  return {
+    root,
+    stats: {
+      bulbs: bulbs.count,
+      treeBulbs: tree.bulbCount,
+      trees: forest.placements.length + 1,
+      lanterns: forest.lanternCount,
+      pointLights: lights.pointLights.length,
+      quality: QUALITY,
+    },
+    // handy for whatever controls the character: walkable ice area
+    bounds: { rx: RINK.rx, rz: RINK.rz, iceY: RINK.iceY, islandRadius: ISLAND_RADIUS },
+    // camera (optional) keeps the snow volume around the view
+    update(t, camera) {
+      bulbs.material.uniforms.uTime.value = t;
+      glow.uniforms.uGlowFlicker.value = 0.96 + 0.04 * Math.sin(t * 2.3);
+      sky.update(t);
+      tree.update(t);
+      lights.update(t);
+      snow.update(t, camera);
+    },
+    setSize,
+    // s > 1 when the camera pulls back (portrait / narrow screens): keeps the
+    // haze, bulb falloff and snow density looking the same as the wide view
+    setDistanceScale(s) {
+      scene.fog.density = PALETTE.fogDensity / s;
+      bulbs.material.uniforms.uFade.value = 1 / s;
+      snow.setDistanceScale(s);
+    },
+  };
+}
+
+// ===== camera/cinematicCamera.js =====
+
+
+// Wide, cinematic framing: the whole rink + the central tree in one shot.
+// If a focus object (e.g. your character) is passed to update(), the camera
+// drifts gently with it but never loses the wide composition.
+//
+// fit(aspect) keeps that composition on any screen: on wide screens (≥ 16:9)
+// the shot is exactly the original one; on narrower / portrait screens the
+// camera widens its fov, pulls back and rises a little so the full rink and
+// tree stay in frame. It returns the distance scale (1 = original).
+
+const CINEMATIC_VIEW = {
+  fov: 38,
+  position: new THREE.Vector3(0, 13.5, 56),
+  target: new THREE.Vector3(0, 6.5, 0),
+  rinkHalfWidth: 33, // boards + a little margin, must stay visible
+};
+
+class CinematicCamera {
+  constructor(camera, view = CINEMATIC_VIEW) {
+    this.camera = camera;
+    this.view = view;
+    this.basePos = view.position.clone();
+    this.baseTarget = view.target.clone();
+    this.portrait = 0; // 0 = wide/landscape … 1 = tall portrait
+    this.pos = view.position.clone();
+    this.look = view.target.clone();
+    camera.near = 0.1;
+    camera.far = 1200;
+    this._p = new THREE.Vector3();
+    this._l = new THREE.Vector3();
+    this.fit(camera.aspect);
+    this.pos.copy(this.basePos);
+    this.look.copy(this.baseTarget);
+    camera.position.copy(this.pos);
+    camera.lookAt(this.look);
+  }
+
+  fit(aspect) {
+    const v = this.view;
+    const offset = v.position.clone().sub(v.target);
+    const baseDist = offset.length();
+    const baseElev = Math.asin(offset.y / baseDist);
+    this.portrait = THREE.MathUtils.clamp((1.0 - aspect) / 0.5, 0, 1); // aspect 1 → 0, aspect 0.5 → 1
+    const fov = THREE.MathUtils.lerp(v.fov, 52, this.portrait);
+    const tanH = Math.tan(THREE.MathUtils.degToRad(fov / 2)) * aspect;
+    const dist = Math.max(baseDist, v.rinkHalfWidth / tanH);
+    const elev = THREE.MathUtils.lerp(baseElev, THREE.MathUtils.degToRad(20), this.portrait);
+    this.baseTarget.copy(v.target).setY(THREE.MathUtils.lerp(v.target.y, 5.5, this.portrait));
+    this.basePos.set(0, Math.sin(elev) * dist, Math.cos(elev) * dist).add(this.baseTarget);
+    this.camera.fov = fov;
+    this.camera.aspect = aspect;
+    this.camera.updateProjectionMatrix();
+    return dist / baseDist;
+  }
+
+  update(dt, t, focus = null) {
+    // narrow screens get less sway / follow so the rink edges never leave the frame
+    const freedom = 1 - 0.75 * this.portrait;
+    this._p.copy(this.basePos);
+    this._l.copy(this.baseTarget);
+    this._p.x += Math.sin(t * 0.05) * 4 * freedom;
+    this._p.y += Math.sin(t * 0.07) * 0.6;
+    if (focus) {
+      this._p.x += focus.x * 0.45 * freedom;
+      this._p.z += focus.z * 0.3 * freedom;
+      this._l.x += focus.x * 0.3 * freedom;
+      this._l.z += focus.z * 0.25 * freedom;
+    }
+    const k = 1 - Math.exp(-dt * 1.8);
+    this.pos.lerp(this._p, k);
+    this.look.lerp(this._l, k);
+    this.camera.position.copy(this.pos);
+    this.camera.lookAt(this.look);
+  }
+}
+
+// ===== player/PlaceholderPlayer.js =====
+
+
+// ⚠️ STAND-IN ONLY. This exists so the scene can be explored in isolation.
+// In your real project keep your existing character + movement code and
+// delete this file — the world module does not depend on it.
+
+class PlaceholderPlayer {
+  constructor(scene, bounds) {
+    this.bounds = bounds;
+    this.velocity = new THREE.Vector3();
+    this.keys = new Set();
+
+    const mat = new THREE.MeshStandardMaterial({ color: 0x7a1f2b, roughness: 0.7 });
+    const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.35, 0.9, 4, 8), mat);
+    body.position.y = 0.8;
+    const head = new THREE.Mesh(new THREE.SphereGeometry(0.28, 12, 8), new THREE.MeshStandardMaterial({ color: 0xe8d6c8, roughness: 0.8 }));
+    head.position.y = 1.65;
+    this.mesh = new THREE.Group();
+    this.mesh.add(body, head);
+    this.mesh.position.set(0, bounds.iceY, bounds.rz * 0.7);
+    scene.add(this.mesh);
+
+    addEventListener('keydown', (e) => this.keys.add(e.code));
+    addEventListener('keyup', (e) => this.keys.delete(e.code));
+    this._setupTouch();
+  }
+
+  // Touch / pen: drag anywhere to skate (virtual joystick). Keyboard still works.
+  _setupTouch() {
+    this.stick = { id: null, x0: 0, y0: 0, x: 0, y: 0 };
+    const ring = document.createElement('div');
+    ring.style.cssText = 'position:fixed;width:84px;height:84px;margin:-42px 0 0 -42px;border-radius:50%;' +
+      'border:1px solid rgba(243,217,184,.45);pointer-events:none;display:none;z-index:5';
+    const knob = document.createElement('div');
+    knob.style.cssText = 'position:absolute;left:50%;top:50%;width:30px;height:30px;margin:-15px 0 0 -15px;' +
+      'border-radius:50%;background:rgba(243,217,184,.35)';
+    ring.appendChild(knob);
+    document.body.appendChild(ring);
+    const R = 42;
+    const st = this.stick;
+    addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse' || st.id !== null) return;
+      st.id = e.pointerId; st.x0 = e.clientX; st.y0 = e.clientY; st.x = 0; st.y = 0;
+      ring.style.left = e.clientX + 'px'; ring.style.top = e.clientY + 'px'; ring.style.display = 'block';
+      knob.style.transform = 'translate(0px,0px)';
+    });
+    addEventListener('pointermove', (e) => {
+      if (e.pointerId !== st.id) return;
+      let dx = e.clientX - st.x0, dy = e.clientY - st.y0;
+      const len = Math.hypot(dx, dy);
+      if (len > R) { dx *= R / len; dy *= R / len; }
+      st.x = dx / R; st.y = dy / R;
+      knob.style.transform = `translate(${dx}px,${dy}px)`;
+    });
+    const end = (e) => {
+      if (e.pointerId !== st.id) return;
+      st.id = null; st.x = 0; st.y = 0; ring.style.display = 'none';
+    };
+    addEventListener('pointerup', end);
+    addEventListener('pointercancel', end);
+  }
+
+  get position() {
+    return this.mesh.position;
+  }
+
+  update(dt) {
+    const k = this.keys;
+    const ix = (k.has('KeyD') || k.has('ArrowRight') ? 1 : 0) - (k.has('KeyA') || k.has('ArrowLeft') ? 1 : 0);
+    const iz = (k.has('KeyS') || k.has('ArrowDown') ? 1 : 0) - (k.has('KeyW') || k.has('ArrowUp') ? 1 : 0);
+    const tx = Math.abs(this.stick.x) > 0.15 ? this.stick.x : 0;
+    const tz = Math.abs(this.stick.y) > 0.15 ? this.stick.y : 0;
+    const v = this.velocity;
+    v.x += THREE.MathUtils.clamp(ix + tx, -1, 1) * 14 * dt;
+    v.z += THREE.MathUtils.clamp(iz + tz, -1, 1) * 14 * dt;
+    v.multiplyScalar(Math.exp(-1.2 * dt)); // icy glide
+    if (v.length() > 9) v.setLength(9);
+
+    const p = this.mesh.position;
+    p.addScaledVector(v, dt);
+
+    // stay on the ice, off the island
+    const { rx, rz, islandRadius } = this.bounds;
+    const e = Math.hypot(p.x / (rx - 0.8), p.z / (rz - 0.8));
+    if (e > 1) {
+      p.x /= e; p.z /= e;
+      const n = new THREE.Vector3(p.x / (rx * rx), 0, p.z / (rz * rz)).normalize();
+      v.addScaledVector(n, -Math.max(0, v.dot(n)) * 1.6);
+    }
+    const r = Math.hypot(p.x, p.z), minR = islandRadius + 0.8;
+    if (r < minR) {
+      const n = new THREE.Vector3(p.x, 0, p.z).normalize();
+      p.x = n.x * minR; p.z = n.z * minR;
+      v.addScaledVector(n, -Math.min(0, v.dot(n)) * 1.6);
+    }
+    if (v.lengthSq() > 0.01) this.mesh.rotation.y = Math.atan2(v.x, v.z);
+  }
+}
+
+// ===== main.js =====
+
+
+
+
+
+
+
+
+
+
+// ---- renderer --------------------------------------------------------------
+const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, QUALITY.maxPixelRatio)); // lower on phones
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = LIGHTING.exposure;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.getElementById('app').appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, window.innerWidth / window.innerHeight, 0.1, 1200);
+
+// ---- background + lighting -------------------------------------------------
+const world = createWinterWorld({ scene, renderer });
+console.info('[WinterRink]', world.stats);
+
+// ---- character (stand-in; keep your own in the real project) ---------------
+const player = new PlaceholderPlayer(scene, world.bounds);
+const cine = new CinematicCamera(camera);
+
+// ---- post: HDR target with MSAA → bloom → tone mapping ---------------------
+const buf = renderer.getDrawingBufferSize(new THREE.Vector2());
+const rt = new THREE.WebGLRenderTarget(buf.x, buf.y, { type: THREE.HalfFloatType, samples: QUALITY.msaa });
+const composer = new EffectComposer(renderer, rt);
+composer.addPass(new RenderPass(scene, camera));
+const bs = QUALITY.bloomScale; // half-resolution bloom on phones
+const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth * bs, window.innerHeight * bs), LIGHTING.bloom.strength, LIGHTING.bloom.radius, LIGHTING.bloom.threshold);
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+
+function onResize() {
+  const w = window.innerWidth, h = window.innerHeight;
+  renderer.setSize(w, h);
+  composer.setSize(w, h);
+  bloom.resolution.set(w * bs, h * bs);
+  const b = renderer.getDrawingBufferSize(new THREE.Vector2());
+  world.setSize(b.x, b.y, renderer.getPixelRatio());
+  // portrait / landscape: refit the shot so the rink + tree are never cut off
+  world.setDistanceScale(cine.fit(w / h));
+}
+window.addEventListener('resize', onResize);
+window.addEventListener('orientationchange', () => setTimeout(onResize, 200));
+onResize();
+
+// ---- loop ------------------------------------------------------------------
+let last = performance.now();
+const start = last;
+renderer.setAnimationLoop((now) => {
+  const dt = Math.min((now - last) / 1000, 0.05);
+  last = now;
+  const t = (now - start) / 1000;
+  player.update(dt);
+  cine.update(dt, t, player.position);
+  world.update(t, camera);
+  composer.render(dt);
+});
+
+    </script>
+  </body>
+</html>

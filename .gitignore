@@ -1,0 +1,15 @@
+# Allow-list: this folder also holds system/config files, so ignore everything
+# and only track the project files explicitly.
+/*
+!/.gitignore
+!/CLAUDE.md
+!/preview.html
+!/winter-rink/
+
+# never commit
+node_modules/
+.env
+.env.*
+*.pem
+*.key
+*.zip

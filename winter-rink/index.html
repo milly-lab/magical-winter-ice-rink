@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="theme-color" content="#060c1a" />
+    <title>Magical Winter Forest Ice Rink</title>
+    <style>
+      html, body {
+        margin: 0; width: 100%; height: 100%; height: 100dvh; background: #060c1a;
+        overflow: hidden; overscroll-behavior: none; -webkit-user-select: none; user-select: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+      #app { position: fixed; inset: 0; }
+      #app, canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+      .title {
+        position: fixed; left: calc(28px + env(safe-area-inset-left)); bottom: calc(24px + env(safe-area-inset-bottom));
+        color: #f3d9b8; opacity: 0.75; font: 300 13px/1.5 "Helvetica Neue", Arial, sans-serif;
+        letter-spacing: 0.22em; text-transform: uppercase; pointer-events: none;
+      }
+      @media (max-width: 600px) { .title { font-size: 10px; letter-spacing: 0.16em; left: 16px; bottom: 14px; } }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <div class="title">Magical Winter Forest Ice Rink</div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
