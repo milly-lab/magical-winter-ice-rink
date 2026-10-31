@@ -1360,6 +1360,8 @@ class PlaceholderPlayer {
     this.roll = 0;
     this.time = 0;
     this.target = null;                  // tap / click destination on the ice
+    this.trick = null;                   // running jump animation (Triple Axel)
+    this.glideOut = false;               // extended coast after landing
     this._best = Infinity;
     this._stuck = 0;
     scene.add(this.mesh);
@@ -1382,6 +1384,10 @@ class PlaceholderPlayer {
     v.x += ix * 14 * dt;
     v.z += iz * 14 * dt;
     v.multiplyScalar(Math.exp(-1.2 * dt)); // icy glide
+    if (this.glideOut) {                    // post-landing coast: half the friction → twice the glide
+      if (ix || iz || this.target || v.length() < 0.15) this.glideOut = false;
+      else v.multiplyScalar(Math.exp(0.6 * dt));
+    }
     if (v.length() > 9) v.setLength(9);
 
     const p = this.mesh.position;
@@ -1413,6 +1419,126 @@ class PlaceholderPlayer {
     }
     this.mesh.rotation.y = this.heading;
     this._animate(dt, speed, turn / Math.max(dt, 1e-3));
+    if (this.trick) this._applyTrick(dt);
+  }
+
+  // ---- Triple Axel (≈3 s): prep 0.5 s → air + 1080° spin 1.5 s → landing 1 s ----
+  startTripleAxel(onEnd) {
+    if (this.trick) return false;
+    const v = this.velocity;
+    if (v.length() < 2.5) v.set(Math.sin(this.heading), 0, Math.cos(this.heading)).multiplyScalar(3.5); // keep gliding into it
+    this.trick = { t: 0, onEnd };
+    return true;
+  }
+
+  _applyTrick(dt) {
+    const T = this.trick;
+    T.t += dt;
+    const t = T.t;
+    const R = this.rig;
+    const clamp01 = (x) => Math.min(1, Math.max(0, x));
+    const sm = (a, b, x) => { const u = clamp01((x - a) / (b - a)); return u * u * (3 - 2 * u); };
+    const mix = (obj, key, target, w) => { obj[key] = lerp(obj[key], target, w); };
+    const PREP = 0.2, AIR = 1.5, END = 2.4;   // prep 0.2 s · air 1.5 s · landing 0.7 s
+
+    // weights
+    const wCross = sm(0.02, 0.2, t) * (1 - sm(1.7, 2.0, t));       // arms crossed: prep → air
+    const wCrouch = sm(0.06, 0.18, t) * (1 - sm(0.2, 0.3, t));        // take-off knee bend
+    const wAir = sm(0.2, 0.3, t) * (1 - sm(1.65, 1.75, t));           // tight air position
+    const wLand = sm(1.65, 1.75, t) * (1 - sm(2.0, 2.4, t));         // landing position
+    const wOpen = sm(1.7, 1.98, t) * (1 - sm(2.05, 2.4, t));           // arms open on landing
+    const absorb = Math.exp(-(((t - 1.82) / 0.13) ** 2));              // knee cushion at touchdown
+
+    // flight: height + exactly 3 turns about the vertical axis
+    const u = clamp01((t - PREP) / AIR);
+    const jumpY = 1.5 * 4 * u * (1 - u);
+    const us = clamp01((u - 1 / 6) / (2 / 3));                         // 1.0 s window: same speed as before, one more turn
+    const e = us * us * us * (us * (us * 6 - 15) + 10);                // fast in the middle
+    const spin = Math.PI * 8 * e;                                      // exactly 1440° (4 turns)
+
+    // ---- legs ----
+    const setLeg = (leg, hx, hz, kn, w) => {
+      mix(leg.hip.rotation, 'x', hx, w);
+      mix(leg.hip.rotation, 'z', hz, w);
+      mix(leg.knee.rotation, 'x', kn, w);
+    };
+    // take-off crouch on both legs
+    setLeg(R.legL, -0.4, 0.03, 0.85, wCrouch);
+    setLeg(R.legR, -0.4, -0.03, 0.85, wCrouch);
+    // air: legs straight and together, right leg crossed slightly in front
+    setLeg(R.legL, 0.06, -0.03, 0.06, wAir);
+    setLeg(R.legR, -0.1, 0.03, 0.08, wAir);
+    // landing: right leg supports and bends to absorb, left leg extends behind
+    setLeg(R.legR, -0.35 - 0.25 * absorb, -0.04, 0.5 + 0.5 * absorb, wLand);
+    setLeg(R.legL, 0.75, 0.14, 0.1, wLand);
+    const point = 0.35 * Math.min(1, jumpY / 0.3) * wAir;              // pointed toes only when high enough
+    for (const leg of [R.legL, R.legR]) {
+      leg.ankle.rotation.x = -(leg.hip.rotation.x + leg.knee.rotation.x) + point;
+      leg.ankle.rotation.z = -leg.hip.rotation.z * 0.6;
+    }
+    const L = R.L;
+    const ext = (leg) => (L.thigh * Math.cos(leg.hip.rotation.x) + L.shin * Math.cos(leg.hip.rotation.x + leg.knee.rotation.x)) * Math.cos(leg.hip.rotation.z) + L.foot;
+    R.pelvis.position.y = Math.max(ext(R.legL), ext(R.legR));
+    mix(R.pelvis.position, 'x', 0, Math.max(wAir, wLand));
+
+    // ---- torso / head ----
+    const wBody = Math.max(wAir, wCrouch * 0.5);
+    mix(R.torso.rotation, 'x', 0.02, wBody);
+    mix(R.torso.rotation, 'y', 0, wBody);
+    mix(R.torso.rotation, 'z', 0, wBody);
+    mix(R.torso.rotation, 'x', 0.22 + 0.15 * absorb, wLand);
+    mix(R.torso.rotation, 'y', 0, wLand);
+    mix(R.body.rotation, 'z', 0, Math.max(wAir, wLand));
+    R.neck.rotation.set(-R.torso.rotation.x * 0.7, -R.torso.rotation.y * 0.6, 0);
+
+    // ---- arms: real shoulder/elbow joints form the X in front of the chest ----
+    const setArm = (arm, x, y, z, el, w) => {
+      mix(arm.shoulder.rotation, 'x', x, w);
+      mix(arm.shoulder.rotation, 'y', y, w);
+      mix(arm.shoulder.rotation, 'z', z, w);
+      mix(arm.elbow.rotation, 'x', el, w);
+    };
+    setArm(R.armL, -1.6, -0.8, -0.6, -1.1, wCross);   // left forearm on top / in front
+    setArm(R.armR, -1.5, 1.1, 0.7, -1.1, wCross);     // right forearm underneath
+    setArm(R.armL, -0.25, 0, 1.25, -0.2, wOpen);
+    setArm(R.armR, -0.25, 0, -1.25, -0.2, wOpen);
+
+    // ---- forward travel: ~1 m from the take-off spot to the landing spot ----
+    const pos = this.mesh.position, vel = this.velocity;
+    if (t >= PREP && !T.takeoff) {
+      T.takeoff = new THREE.Vector2(pos.x, pos.z);
+      T.dir = new THREE.Vector2(Math.sin(this.heading), Math.cos(this.heading));
+      T.saved = vel.clone();                                           // movement state to restore
+      // longest clear path up to 8 m (stays on the ice, outside the island)
+      const { rx, rz, islandRadius } = this.bounds;
+      const okAt = (d) => {
+        const x = T.takeoff.x + T.dir.x * d, z = T.takeoff.y + T.dir.y * d;
+        return Math.hypot(x / (rx - 0.8), z / (rz - 0.8)) <= 1 && Math.hypot(x, z) >= islandRadius + 0.8;
+      };
+      T.dist = 0;
+      for (let d = 0.1; d <= 8.0001; d += 0.1) { if (!okAt(d)) break; T.dist = d; }
+    }
+    if (T.takeoff && t < PREP + AIR) {
+      pos.x = T.takeoff.x + T.dir.x * T.dist * u;                      // continuous travel during the whole flight
+      pos.z = T.takeoff.y + T.dir.y * T.dist * u;
+    } else if (T.takeoff && !T.landed) {
+      T.landed = true;
+      vel.set(T.dir.x, 0, T.dir.y).multiplyScalar(T.dist / AIR);          // carry the flight speed onto the ice
+      this.glideOut = true;                                            // long coast after the landing
+    }
+
+    // ---- whole-body flight ----
+    this.mesh.position.y = this.bounds.iceY + jumpY;
+    this.mesh.rotation.y = this.heading + spin;
+
+    if (t >= END) {
+      // restore: on the ice, facing the travel direction, normal skating pose next frame
+      this.mesh.position.y = this.bounds.iceY;
+      this.mesh.rotation.y = this.heading;
+      for (const arm of [R.armL, R.armR]) arm.shoulder.rotation.y = 0;
+      this.trick = null;
+      if (T.onEnd) T.onEnd();
+    }
   }
 
   setTarget(x, z) {
@@ -1637,6 +1763,24 @@ console.info('[WinterRink]', world.stats);
 const player = new PlaceholderPlayer(scene, world.bounds);
 const cine = new FollowCamera(camera);
 const controls = new PointerControls(renderer.domElement, camera, cine, player, world.bounds, scene);
+
+// ---- temporary Triple Axel button --------------------------------------------
+const axelBtn = document.createElement('button');
+axelBtn.textContent = '트리플 악셀';
+axelBtn.style.cssText = [
+  'position:fixed', 'left:50%', 'bottom:22px', 'transform:translateX(-50%)', 'z-index:10',
+  'padding:9px 22px', 'border-radius:999px', 'border:1px solid rgba(243,217,184,.45)',
+  'background:rgba(6,12,26,.55)', 'color:#f3d9b8', 'cursor:pointer',
+  'font:300 13px/1 "Helvetica Neue", Arial, sans-serif', 'letter-spacing:.18em',
+  'backdrop-filter:blur(4px)', '-webkit-backdrop-filter:blur(4px)', 'transition:opacity .3s',
+].join(';');
+axelBtn.addEventListener('click', () => {
+  if (axelBtn.disabled) return;
+  const started = player.startTripleAxel(() => { axelBtn.disabled = false; axelBtn.style.opacity = '1'; });
+  if (started) { axelBtn.disabled = true; axelBtn.style.opacity = '0.4'; }
+  axelBtn.blur();
+});
+document.body.appendChild(axelBtn);
 
 // ---- post: HDR target with MSAA → bloom → tone mapping ---------------------
 const buf = renderer.getDrawingBufferSize(new THREE.Vector2());
