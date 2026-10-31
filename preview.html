@@ -1118,60 +1118,231 @@ function createWinterWorld({ scene, renderer }) {
   };
 }
 
-// ===== camera/cinematicCamera.js =====
+// ===== camera/followCamera.js =====
+// Third-person follow camera: ~3 m behind and ~1.7 m above the skater.
+// Yaw follows the skater's heading with smoothing (no snapping on sharp turns
+// or sudden stops); position and look-at point are also eased.
 
-// Wide, cinematic framing: the whole rink + the central tree in one shot.
-// If a focus object (e.g. your character) is passed to update(), the camera
-// drifts gently with it but never loses the wide composition.
-
-const CINEMATIC_VIEW = {
-  fov: 38,
-  position: new THREE.Vector3(0, 13.5, 56),
-  target: new THREE.Vector3(0, 6.5, 0),
-};
-
-class CinematicCamera {
-  constructor(camera, view = CINEMATIC_VIEW) {
+class FollowCamera {
+  constructor(camera, { distance = 3.0, height = 1.7, lookHeight = 1.15, lookAhead = 1.6 } = {}) {
     this.camera = camera;
-    this.view = view;
-    this.pos = view.position.clone();
-    this.look = view.target.clone();
-    camera.fov = view.fov;
-    camera.near = 0.1;
-    camera.far = 1200;
-    camera.updateProjectionMatrix();
-    camera.position.copy(this.pos);
-    camera.lookAt(this.look);
+    this.distance = distance;
+    this.height = height;
+    this.lookHeight = lookHeight;
+    this.lookAhead = lookAhead;
+    this.yaw = null;
+    // user orbit + zoom (defaults reproduce exactly 3 m behind / 1.7 m above)
+    this.orbitYaw = 0;
+    this.pitch = Math.atan2(height, distance);
+    this.radius = Math.hypot(height, distance);
+    this.targetRadius = this.radius;
+    this.minPitch = THREE.MathUtils.degToRad(5);
+    this.maxPitch = THREE.MathUtils.degToRad(65);
+    this.minRadius = 1.8;
+    this.maxRadius = 9;
+    this.pos = new THREE.Vector3();
+    this.look = new THREE.Vector3();
     this._p = new THREE.Vector3();
     this._l = new THREE.Vector3();
+    camera.fov = 55;
+    camera.near = 0.05;
+    camera.far = 1200;
+    camera.updateProjectionMatrix();
   }
 
-  update(dt, t, focus = null) {
-    const { position, target } = this.view;
-    this._p.copy(position);
-    this._l.copy(target);
-    // slow "breathing" drift
-    this._p.x += Math.sin(t * 0.05) * 4;
-    this._p.y += Math.sin(t * 0.07) * 0.6;
-    if (focus) {
-      this._p.x += focus.x * 0.45;
-      this._p.z += focus.z * 0.3;
-      this._l.x += focus.x * 0.3;
-      this._l.z += focus.z * 0.25;
+  rotate(dYaw, dPitch) {
+    this.orbitYaw += dYaw;
+    this.pitch = THREE.MathUtils.clamp(this.pitch + dPitch, this.minPitch, this.maxPitch);
+  }
+
+  zoom(factor) {
+    this.targetRadius = THREE.MathUtils.clamp(this.targetRadius * factor, this.minRadius, this.maxRadius);
+  }
+
+  _targets(target, followYaw) {
+    const yaw = followYaw + this.orbitYaw;
+    const fx = Math.sin(yaw), fz = Math.cos(yaw);
+    const back = this.radius * Math.cos(this.pitch), up = this.radius * Math.sin(this.pitch);
+    this._p.set(target.x - fx * back, Math.max(target.y + up, 0.35), target.z - fz * back);
+    // keep the camera out of the central tree / snow island
+    const r = Math.hypot(this._p.x, this._p.z), minR = 6.9;
+    if (r < minR) { const k = minR / Math.max(r, 1e-3); this._p.x *= k; this._p.z *= k; }
+    this._l.set(target.x + fx * this.lookAhead, target.y + this.lookHeight, target.z + fz * this.lookAhead);
+  }
+
+  update(dt, target, heading) {
+    if (this.yaw === null) {
+      this.yaw = heading;
+      this._targets(target, this.yaw);
+      this.pos.copy(this._p);
+      this.look.copy(this._l);
     }
-    const k = 1 - Math.exp(-dt * 1.8);
-    this.pos.lerp(this._p, k);
-    this.look.lerp(this._l, k);
+    // shortest-angle eased yaw
+    let d = heading - this.yaw;
+    d = Math.atan2(Math.sin(d), Math.cos(d));
+    this.yaw += d * (1 - Math.exp(-dt * 2.6));
+    this.radius += (this.targetRadius - this.radius) * (1 - Math.exp(-dt * 8)); // smooth zoom
+    this._targets(target, this.yaw);
+    this.pos.lerp(this._p, 1 - Math.exp(-dt * 6.0));
+    this.look.lerp(this._l, 1 - Math.exp(-dt * 8.0));
     this.camera.position.copy(this.pos);
     this.camera.lookAt(this.look);
   }
 }
 
 // ===== player/PlaceholderPlayer.js =====
+// Clay-doll figure skater (brown hair, big head, white hoodie, black pants,
+// white figure skates) built from simple rounded primitives, with a jointed
+// rig (shoulders, elbows, hips, knees, ankles) and idle + skating motion.
+// Movement / WASD / arrow-key controls are unchanged.
 
-// ⚠️ STAND-IN ONLY. This exists so the scene can be explored in isolation.
-// In your real project keep your existing character + movement code and
-// delete this file — the world module does not depend on it.
+function clayMat(color, roughness = 0.78) {
+  return new THREE.MeshStandardMaterial({ color, roughness, metalness: 0 });
+}
+
+function buildSkater() {
+  const C = {
+    skin: clayMat(0xf2d2bd),
+    hair: clayMat(0x6b4026, 0.7),
+    hoodie: clayMat(0xf4f1ec),
+    hoodieShade: clayMat(0xe4dfd7),
+    pants: clayMat(0x1d1d22),
+    boot: clayMat(0xfafafa, 0.55),
+    blade: new THREE.MeshStandardMaterial({ color: 0xc9d2dc, roughness: 0.25, metalness: 0.9 }),
+    eye: clayMat(0x1a1210, 0.4),
+    blush: clayMat(0xf0a8a0, 0.9),
+  };
+  const capsule = (r, len, mat) => {
+    const m = new THREE.Mesh(new THREE.CapsuleGeometry(r, len, 5, 12), mat);
+    m.position.y = -(len / 2 + r * 0.6); // hangs below its joint
+    return m;
+  };
+  const S = (r, mat, w = 16, h = 12) => new THREE.Mesh(new THREE.SphereGeometry(r, w, h), mat);
+
+  const L = { thigh: 0.36, shin: 0.34, foot: 0.13, upper: 0.25, fore: 0.23 };
+  const root = new THREE.Group();      // on the ice, yaw
+  const body = new THREE.Group();      // roll / bob
+  const pelvis = new THREE.Group();
+  root.add(body);
+  body.add(pelvis);
+
+  // hips / pants top
+  const hips = S(0.17, C.pants);
+  hips.scale.set(1.15, 0.75, 0.9);
+  pelvis.add(hips);
+
+  // torso (hoodie)
+  const torso = new THREE.Group();
+  torso.position.y = 0.04;
+  pelvis.add(torso);
+  const chest = new THREE.Mesh(new THREE.CapsuleGeometry(0.19, 0.22, 6, 16), C.hoodie);
+  chest.scale.set(1.12, 1, 0.9);
+  chest.position.y = 0.2;
+  torso.add(chest);
+  const hem = new THREE.Mesh(new THREE.TorusGeometry(0.19, 0.035, 8, 20), C.hoodieShade);
+  hem.rotation.x = Math.PI / 2; hem.scale.set(1.12, 0.9, 1); hem.position.y = 0.03;
+  torso.add(hem);
+  const pocket = new THREE.Mesh(new THREE.CapsuleGeometry(0.06, 0.12, 4, 10), C.hoodieShade);
+  pocket.rotation.z = Math.PI / 2; pocket.scale.set(1, 1, 0.45); pocket.position.set(0, 0.13, 0.165);
+  torso.add(pocket);
+  const hood = S(0.15, C.hoodieShade);
+  hood.scale.set(1.25, 0.7, 0.75); hood.position.set(0, 0.42, -0.1);
+  torso.add(hood);
+  for (const sx of [-1, 1]) {
+    const cord = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.13, 5), C.hoodieShade);
+    cord.position.set(0.045 * sx, 0.34, 0.17); cord.rotation.x = -0.25;
+    torso.add(cord);
+  }
+
+  // head (slightly larger than the body)
+  const neck = new THREE.Group();
+  neck.position.y = 0.45;
+  torso.add(neck);
+  const head = new THREE.Group();
+  head.position.y = 0.27;
+  neck.add(head);
+  const skull = S(0.27, C.skin, 24, 18);
+  skull.scale.set(1, 0.95, 0.95);
+  head.add(skull);
+  // hair: a cap over the top (open at the face) + a back piece hidden inside the face
+  const hair = new THREE.Mesh(new THREE.SphereGeometry(0.29, 24, 14, 0, Math.PI * 2, 0, 1.45), C.hair);
+  hair.position.y = 0.06;
+  head.add(hair);
+  const hairBack = S(0.28, C.hair, 24, 18);
+  hairBack.position.set(0, 0.0, -0.06);
+  head.add(hairBack);
+  // bangs
+  for (const [x, y, s] of [[-0.12, 0.13, 0.11], [0.0, 0.16, 0.12], [0.12, 0.13, 0.11], [-0.2, 0.0, 0.09], [0.2, 0.0, 0.09]]) {
+    const b = S(s, C.hair, 12, 10);
+    b.scale.set(1.1, 0.75, 0.7); b.position.set(x, y, 0.2 - Math.abs(x) * 0.35);
+    head.add(b);
+  }
+  for (const sx of [-1, 1]) {
+    const eye = S(0.028, C.eye, 10, 8);
+    eye.scale.set(1, 1.25, 0.6); eye.position.set(0.085 * sx, -0.01, 0.245);
+    head.add(eye);
+    const blush = S(0.035, C.blush, 10, 8);
+    blush.scale.set(1.3, 0.7, 0.35); blush.position.set(0.15 * sx, -0.08, 0.215);
+    head.add(blush);
+  }
+
+  // arms: shoulder → upper arm (sleeve) → elbow → forearm (sleeve) → hand
+  const arm = (side) => {
+    const shoulder = new THREE.Group();
+    shoulder.position.set(0.25 * side, 0.36, 0);
+    torso.add(shoulder);
+    shoulder.add(capsule(0.065, L.upper - 0.13, C.hoodie));
+    const elbow = new THREE.Group();
+    elbow.position.y = -L.upper;
+    shoulder.add(elbow);
+    elbow.add(capsule(0.058, L.fore - 0.12, C.hoodie));
+    const cuff = new THREE.Mesh(new THREE.TorusGeometry(0.052, 0.018, 6, 12), C.hoodieShade);
+    cuff.rotation.x = Math.PI / 2; cuff.position.y = -L.fore + 0.02;
+    elbow.add(cuff);
+    const hand = S(0.06, C.skin, 12, 10);
+    hand.position.y = -L.fore - 0.03;
+    elbow.add(hand);
+    return { shoulder, elbow };
+  };
+  // legs: hip → thigh → knee → shin → ankle → skate (boot + blade)
+  const leg = (side) => {
+    const hip = new THREE.Group();
+    hip.position.set(0.1 * side, -0.02, 0);
+    pelvis.add(hip);
+    hip.add(capsule(0.085, L.thigh - 0.15, C.pants));
+    const knee = new THREE.Group();
+    knee.position.y = -L.thigh;
+    hip.add(knee);
+    knee.add(capsule(0.075, L.shin - 0.13, C.pants));
+    const ankle = new THREE.Group();
+    ankle.position.y = -L.shin;
+    knee.add(ankle);
+    const boot = new THREE.Mesh(new THREE.CapsuleGeometry(0.075, 0.12, 5, 12), C.boot);
+    boot.rotation.x = Math.PI / 2; boot.scale.set(0.95, 1, 0.9); boot.position.set(0, -0.045, 0.04);
+    ankle.add(boot);
+    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.078, 0.082, 0.12, 12), C.boot);
+    shaft.position.y = 0.01;
+    ankle.add(shaft);
+    const blade = new THREE.Mesh(new THREE.BoxGeometry(0.014, 0.035, 0.3), C.blade);
+    blade.position.set(0, -L.foot + 0.0175, 0.03); // blade edge rests on the ice
+    ankle.add(blade);
+    const pick = new THREE.Mesh(new THREE.BoxGeometry(0.014, 0.03, 0.03), C.blade);
+    pick.position.set(0, -L.foot + 0.012, 0.19); pick.rotation.x = 0.6;
+    ankle.add(pick);
+    return { hip, knee, ankle };
+  };
+
+  const rig = {
+    root, body, pelvis, torso, neck, head,
+    armL: arm(1), armR: arm(-1),   // facing +z, so the left side is +x
+    legL: leg(1), legR: leg(-1),
+    L,
+  };
+  root.traverse((o) => { if (o.isMesh) o.castShadow = false; });
+  return rig;
+}
+
+const lerp = (a, b, t) => a + (b - a) * t;
 
 class PlaceholderPlayer {
   constructor(scene, bounds) {
@@ -1179,14 +1350,18 @@ class PlaceholderPlayer {
     this.velocity = new THREE.Vector3();
     this.keys = new Set();
 
-    const mat = new THREE.MeshStandardMaterial({ color: 0x7a1f2b, roughness: 0.7 });
-    const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.35, 0.9, 4, 8), mat);
-    body.position.y = 0.8;
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.28, 12, 8), new THREE.MeshStandardMaterial({ color: 0xe8d6c8, roughness: 0.8 }));
-    head.position.y = 1.65;
-    this.mesh = new THREE.Group();
-    this.mesh.add(body, head);
+    this.rig = buildSkater();
+    this.mesh = this.rig.root;
     this.mesh.position.set(0, bounds.iceY, bounds.rz * 0.7);
+    this.heading = Math.PI;              // start facing the central tree
+    this.mesh.rotation.y = this.heading;
+    this.phase = 0;
+    this.glide = 0;                      // 0 = idle … 1 = skating
+    this.roll = 0;
+    this.time = 0;
+    this.target = null;                  // tap / click destination on the ice
+    this._best = Infinity;
+    this._stuck = 0;
     scene.add(this.mesh);
 
     addEventListener('keydown', (e) => this.keys.add(e.code));
@@ -1202,6 +1377,8 @@ class PlaceholderPlayer {
     const ix = (k.has('KeyD') || k.has('ArrowRight') ? 1 : 0) - (k.has('KeyA') || k.has('ArrowLeft') ? 1 : 0);
     const iz = (k.has('KeyS') || k.has('ArrowDown') ? 1 : 0) - (k.has('KeyW') || k.has('ArrowUp') ? 1 : 0);
     const v = this.velocity;
+    if (ix || iz) this.target = null;   // keyboard always wins
+    if (this.target) this._steerToTarget(dt);
     v.x += ix * 14 * dt;
     v.z += iz * 14 * dt;
     v.multiplyScalar(Math.exp(-1.2 * dt)); // icy glide
@@ -1224,7 +1401,209 @@ class PlaceholderPlayer {
       p.x = n.x * minR; p.z = n.z * minR;
       v.addScaledVector(n, -Math.min(0, v.dot(n)) * 1.6);
     }
-    if (v.lengthSq() > 0.01) this.mesh.rotation.y = Math.atan2(v.x, v.z);
+
+    // smooth turning toward the direction of travel (no snapping)
+    const speed = v.length();
+    let turn = 0;
+    if (speed > 0.15) {
+      let d = Math.atan2(v.x, v.z) - this.heading;
+      d = Math.atan2(Math.sin(d), Math.cos(d));
+      turn = d * (1 - Math.exp(-dt * 7));
+      this.heading += turn;
+    }
+    this.mesh.rotation.y = this.heading;
+    this._animate(dt, speed, turn / Math.max(dt, 1e-3));
+  }
+
+  setTarget(x, z) {
+    this.target = new THREE.Vector2(x, z);
+    this._best = Infinity;
+    this._stuck = 0;
+  }
+
+  _steerToTarget(dt) {
+    const p = this.mesh.position, v = this.velocity;
+    const dx = this.target.x - p.x, dz = this.target.y - p.z;
+    const dist = Math.hypot(dx, dz);
+    if (dist < 0.35) { this.target = null; return; }
+    // give up if blocked (e.g. by the island or the boards)
+    if (dist < this._best - 0.05) { this._best = dist; this._stuck = 0; }
+    else if ((this._stuck += dt) > 1.5) { this.target = null; return; }
+    const want = Math.min(6, dist * 1.4);           // ease in on arrival
+    const k = 1 - Math.exp(-dt * 2.5);
+    v.x += ((dx / dist) * want - v.x) * k;
+    v.z += ((dz / dist) * want - v.z) * k;
+  }
+
+  _animate(dt, speed, yawRate) {
+    const R = this.rig;
+    this.time += dt;
+    const t = this.time;
+    const pushing = this.keys.size > 0 || (this.target !== null && speed < 5.5);
+    const target = THREE.MathUtils.clamp(speed / 2.5, 0, 1);
+    this.glide = lerp(this.glide, target, 1 - Math.exp(-dt * 4));
+    const g = this.glide;
+    // stroke rhythm: alternating pushes while moving, coasting when keys are released
+    this.phase += dt * (2.4 + speed * 0.22) * (pushing ? 1 : 0.35) * g;
+    const s = Math.sin(this.phase);
+    const pushL = Math.max(0, s) * (pushing ? 1 : 0.35);
+    const pushR = Math.max(0, -s) * (pushing ? 1 : 0.35);
+    const breathe = Math.sin(t * 1.8);
+    const sway = Math.sin(t * 0.7);
+
+    // ---- legs --------------------------------------------------------------
+    const legPose = (leg, push, side) => {
+      const support = 1 - push;
+      const hx = lerp(-0.08 + 0.03 * sway * side, -0.32 * support + 0.55 * push, g);
+      const hz = lerp(0.04, 0.06 + 0.38 * push, g) * side;
+      const kn = lerp(0.14, 0.58 * support + 0.12 * push, g);
+      leg.hip.rotation.set(hx, 0, hz);
+      leg.knee.rotation.x = kn;
+      leg.ankle.rotation.x = -(hx + kn) + 0.12 * push * g;  // keep the blade flat on the ice
+      leg.ankle.rotation.z = -hz * 0.6;
+      const L = R.L;
+      return (L.thigh * Math.cos(hx) + L.shin * Math.cos(hx + kn)) * Math.cos(hz) + L.foot;
+    };
+    const hL = legPose(R.legL, pushL, 1);
+    const hR = legPose(R.legR, pushR, -1);
+    // the longer (supporting) leg stays on the ice; the pushing leg lifts slightly
+    R.pelvis.position.y = Math.max(hL, hR) + 0.004 * breathe * (1 - g);
+    R.pelvis.position.x = lerp(0.015 * sway, 0.05 * s, g);
+
+    // ---- torso / head ------------------------------------------------------
+    this.roll = lerp(this.roll, THREE.MathUtils.clamp(-yawRate * 0.12, -0.3, 0.3), 1 - Math.exp(-dt * 5));
+    R.body.rotation.z = this.roll;
+    R.torso.rotation.set(lerp(0.02, 0.38, g), lerp(0.04 * sway, -0.18 * s, g), lerp(0, -0.07 * s, g));
+    R.torso.scale.setScalar(1 + 0.012 * breathe * (1 - g));
+    R.neck.rotation.set(-R.torso.rotation.x * 0.7, -R.torso.rotation.y * 0.6, 0);
+    R.head.rotation.z = lerp(0.04 * sway, 0, g);
+
+    // ---- arms (balance) ----------------------------------------------------
+    const armPose = (arm, side) => {
+      const swing = -0.45 * s * side;                   // opposite to the pushing leg
+      arm.shoulder.rotation.set(
+        lerp(0.05 + 0.03 * breathe, swing - 0.1, g),
+        0,
+        lerp(0.2, 1.05 + 0.12 * Math.sin(this.phase * 2 + side), g) * side
+      );
+      arm.elbow.rotation.x = lerp(-0.3, -0.35 + 0.1 * s * side, g);
+    };
+    armPose(R.armL, 1);
+    armPose(R.armR, -1);
+  }
+}
+
+// ===== input/pointerControls.js =====
+// Mouse + touch on the canvas:
+//  - drag (mouse or one finger)  → orbit the camera around the skater
+//  - wheel / two-finger pinch    → smooth zoom (distance limited)
+//  - click / tap on the ice      → skate to that spot
+// A press only counts as a click/tap if it moved < 8 px and lasted < 400 ms,
+// so dragging never triggers a move. WASD / arrow keys are untouched.
+
+class PointerControls {
+  constructor(dom, camera, follow, player, bounds, scene) {
+    this.dom = dom;
+    this.camera = camera;
+    this.follow = follow;
+    this.player = player;
+    this.bounds = bounds;
+    this.pointers = new Map();
+    this.press = null;      // candidate click / tap
+    this.pinchDist = 0;
+    this.raycaster = new THREE.Raycaster();
+    this.plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -bounds.iceY);
+    this._ndc = new THREE.Vector2();
+    this._hit = new THREE.Vector3();
+
+    // small fading ring that marks the tapped destination
+    this.marker = new THREE.Mesh(
+      new THREE.RingGeometry(0.28, 0.36, 32),
+      new THREE.MeshBasicMaterial({ color: 0xffd2a0, transparent: true, opacity: 0, depthWrite: false, fog: false })
+    );
+    this.marker.rotation.x = -Math.PI / 2;
+    this.marker.position.y = bounds.iceY + 0.02;
+    this.markerLife = 0;
+    scene.add(this.marker);
+
+    dom.style.touchAction = 'none';
+    dom.addEventListener('pointerdown', (e) => this._down(e));
+    dom.addEventListener('pointermove', (e) => this._move(e));
+    dom.addEventListener('pointerup', (e) => this._up(e));
+    dom.addEventListener('pointercancel', (e) => this._up(e, true));
+    dom.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      this.follow.zoom(Math.exp(e.deltaY * 0.0015));
+    }, { passive: false });
+    dom.addEventListener('contextmenu', (e) => e.preventDefault());
+  }
+
+  _down(e) {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    this.dom.setPointerCapture(e.pointerId);
+    this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (this.pointers.size === 1) {
+      this.press = { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now() };
+    } else {
+      this.press = null; // second finger: this is a pinch, not a tap
+      this.pinchDist = this._pinchDistance();
+    }
+  }
+
+  _move(e) {
+    const prev = this.pointers.get(e.pointerId);
+    if (!prev) return;
+    const dx = e.clientX - prev.x, dy = e.clientY - prev.y;
+    prev.x = e.clientX; prev.y = e.clientY;
+
+    if (this.pointers.size >= 2) {
+      const d = this._pinchDistance();
+      if (this.pinchDist > 0 && d > 0) this.follow.zoom(this.pinchDist / d);
+      this.pinchDist = d;
+      return;
+    }
+    if (this.press && Math.hypot(e.clientX - this.press.x, e.clientY - this.press.y) > 8) this.press = null; // became a drag
+    if (!this.press) this.follow.rotate(-dx * 0.006, dy * 0.004);
+  }
+
+  _up(e, cancelled = false) {
+    if (!this.pointers.has(e.pointerId)) return;
+    this.pointers.delete(e.pointerId);
+    if (this.pointers.size < 2) this.pinchDist = 0;
+    const p = this.press;
+    if (!cancelled && p && p.id === e.pointerId && performance.now() - p.t < 400) this._tap(e.clientX, e.clientY);
+    if (p && p.id === e.pointerId) this.press = null;
+  }
+
+  _pinchDistance() {
+    const [a, b] = [...this.pointers.values()];
+    return a && b ? Math.hypot(a.x - b.x, a.y - b.y) : 0;
+  }
+
+  _tap(cx, cy) {
+    const r = this.dom.getBoundingClientRect();
+    this._ndc.set(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1);
+    this.raycaster.setFromCamera(this._ndc, this.camera);
+    if (!this.raycaster.ray.intersectPlane(this.plane, this._hit)) return;
+    let { x, z } = this._hit;
+    const { rx, rz, islandRadius } = this.bounds;
+    if ((x / rx) ** 2 + (z / rz) ** 2 > 1) return;          // only taps on the rink floor
+    const e = Math.hypot(x / (rx - 0.8), z / (rz - 0.8));   // same limits as movement
+    if (e > 1) { x /= e; z /= e; }
+    const rr = Math.hypot(x, z), minR = islandRadius + 0.8;
+    if (rr < minR) { const k = minR / Math.max(rr, 1e-3); x *= k; z *= k; }
+    this.player.setTarget(x, z);
+    this.marker.position.x = x;
+    this.marker.position.z = z;
+    this.markerLife = 1;
+  }
+
+  update(dt) {
+    if (this.player.target === null) this.markerLife = Math.min(this.markerLife, 0.4);
+    this.markerLife = Math.max(0, this.markerLife - dt * 0.7);
+    this.marker.material.opacity = 0.75 * this.markerLife;
+    this.marker.visible = this.markerLife > 0;
+    this.marker.scale.setScalar(1 + (1 - this.markerLife) * 0.6);
   }
 }
 
@@ -1256,7 +1635,8 @@ console.info('[WinterRink]', world.stats);
 
 // ---- character (stand-in; keep your own in the real project) ---------------
 const player = new PlaceholderPlayer(scene, world.bounds);
-const cine = new CinematicCamera(camera);
+const cine = new FollowCamera(camera);
+const controls = new PointerControls(renderer.domElement, camera, cine, player, world.bounds, scene);
 
 // ---- post: HDR target with MSAA → bloom → tone mapping ---------------------
 const buf = renderer.getDrawingBufferSize(new THREE.Vector2());
@@ -1287,7 +1667,8 @@ renderer.setAnimationLoop((now) => {
   last = now;
   const t = (now - start) / 1000;
   player.update(dt);
-  cine.update(dt, t, player.position);
+  cine.update(dt, player.position, player.heading);
+  controls.update(dt);
   world.update(t);
   composer.render(dt);
 });
