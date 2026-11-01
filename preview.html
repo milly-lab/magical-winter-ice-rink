@@ -1211,20 +1211,23 @@ function buildSkater() {
     return t;
   })();
   const C = {
-    skin: new THREE.MeshStandardMaterial({ color: 0xf0c4a8, roughness: 0.86, metalness: 0 }),
-    hair: new THREE.MeshStandardMaterial({ color: 0x4f3222, roughness: 0.95, metalness: 0 }),
-    hoodie: new THREE.MeshPhysicalMaterial({ color: 0xf3eee4, roughness: 0.92, sheen: 0.6, sheenRoughness: 0.7, sheenColor: 0xffffff, bumpMap: grain, bumpScale: 0.35 }),
-    hoodieRib: new THREE.MeshPhysicalMaterial({ color: 0xe9e2d6, roughness: 0.95, sheen: 0.5, sheenRoughness: 0.8, sheenColor: 0xffffff, bumpMap: grain, bumpScale: 0.5 }),
-    pants: new THREE.MeshPhysicalMaterial({ color: 0x1c1c21, roughness: 0.96, sheen: 0.35, sheenRoughness: 0.8, sheenColor: 0x5a5a68, bumpMap: grain, bumpScale: 0.3 }),
-    boot: clayMat(0xfafafa, 0.55),
-    blade: new THREE.MeshStandardMaterial({ color: 0xc9d2dc, roughness: 0.25, metalness: 0.9 }),
-    eye: new THREE.MeshStandardMaterial({ color: 0x15100e, roughness: 0.45 }),
-    cord: clayMat(0xdcd4c6, 0.9),
+    skin: new THREE.MeshStandardMaterial({ color: 0xf2d0c0, roughness: 0.9, metalness: 0 }),
+    hair: new THREE.MeshStandardMaterial({ color: 0x593724, roughness: 0.93, metalness: 0 }),
+    hoodie: new THREE.MeshPhysicalMaterial({ color: 0xefedf0, roughness: 0.95, sheen: 0.7, sheenRoughness: 0.75, sheenColor: 0xffffff, bumpMap: grain, bumpScale: 0.3 }),
+    pants: new THREE.MeshPhysicalMaterial({ color: 0x27272b, roughness: 0.97, sheen: 0.4, sheenRoughness: 0.8, sheenColor: 0x6a6a78, bumpMap: grain, bumpScale: 0.3 }),
+    boot: new THREE.MeshStandardMaterial({ color: 0xf5f5f7, roughness: 0.62, metalness: 0 }),
+    blade: new THREE.MeshStandardMaterial({ color: 0xc6ccd4, roughness: 0.3, metalness: 0.85 }),
+    eye: new THREE.MeshStandardMaterial({ color: 0x17110f, roughness: 0.22 }),
+    cord: new THREE.MeshStandardMaterial({ color: 0xe6e4e8, roughness: 0.9, metalness: 0 }),
   };
   const sm01 = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+  // upper body −10% (waist → neck 0.49 → 0.441): only the chest band between the pocket (y 0.1) and the
+  // shoulders (y 0.3) is shortened; pocket and hem stay put, shoulders / hood / collar / neck move down unchanged
+  const TY = (y) => y - 0.049 * sm01(0.1, 0.3, y);
 
   // joint layout — IDENTICAL to the previous rig so every animation keeps working
-  const L = { thigh: 0.36, shin: 0.34, foot: 0.13, upper: 0.25, fore: 0.23 };
+  // arms −10% (upper 0.25 → 0.225, fore 0.23 → 0.207); legs unchanged
+  const L = { thigh: 0.36, shin: 0.34, foot: 0.13, upper: 0.225, fore: 0.207 };
   const root = new THREE.Group();      // on the ice, yaw
   const body = new THREE.Group();      // roll / bob
   const pelvis = new THREE.Group();
@@ -1234,91 +1237,149 @@ function buildSkater() {
   torso.position.y = 0.04;
   pelvis.add(torso);
   const neck = new THREE.Group();
-  neck.position.y = 0.45;
+  neck.position.y = 0.401;            // = TY(0.45)
   torso.add(neck);
   const head = new THREE.Group();
   head.position.y = 0.26;
   neck.add(head);
 
-  // ---------- head: smooth round head, one-piece side-swept hair, minimal face ----------
-  const HR = 0.24;
+  // ---------- head: big round head, thick layered side-swept hair, small low face, round ears ----------
+  // (the head group's joint position is unchanged; the larger head is lifted inside it so it sits on the hood)
+  const HR = 0.26;
   const face = new THREE.Group();
-  face.scale.set(1, 0.97, 0.96);
+  face.position.y = 0.035;
+  face.scale.set(1.04, 0.97, 0.98);
   head.add(face);
-  face.add(new THREE.Mesh(new THREE.SphereGeometry(HR, 48, 32), C.skin));
+  face.add(new THREE.Mesh(new THREE.SphereGeometry(HR, 96, 64), C.skin));
   {
-    // hair = the same sphere pushed out where hair grows and tucked inside the head elsewhere,
-    // so it is a single smooth mass with a soft rounded hairline (no stuck-on pieces)
-    const g = new THREE.SphereGeometry(HR, 64, 40);
+    // hair = the head sphere pushed out where hair grows (a single mass, no stuck-on pieces):
+    // low side-swept fringe with rounded lock tips, full volume on top and sides, tapered nape
+    const g = new THREE.SphereGeometry(HR, 220, 150);
     const p = g.attributes.position, d = new THREE.Vector3();
     for (let i = 0; i < p.count; i++) {
       d.fromBufferAttribute(p, i).normalize();
-      const front = sm01(0.25, 0.75, d.z), back = sm01(0.0, -0.7, d.z);
-      const cutSide = 0.04, cutBack = -0.55;
-      const cutFront = 0.34 - 0.3 * d.x;                    // fringe sweeps across the forehead to one side
+      const lon = Math.atan2(d.x, d.z);                          // 0 = front
+      const al = Math.abs(lon), front = 1 - sm01(0.75, 1.2, al), back = sm01(1.5, 2.15, al);
+      // chunky locks: rounded tips with small V notches between them (more, smaller locks on the fringe)
+      const tipsF = 1 - Math.abs(Math.sin(lon * 7 + 0.9)), tipsS = 1 - Math.abs(Math.sin(lon * 6 + 0.4));
+      const tips = tipsF * front + tipsS * (1 - front);
+      const burn = Math.exp(-(((Math.abs(lon) - 1.12) / 0.2) ** 2));   // side locks falling in front of the ears
+      const cutFront = 0.0 + 0.2 * d.x + 0.11 * (1 - tips) ** 2;     // long fringe sweeping lower toward one side
+      const cutSide = 0.03 - 0.18 * burn + 0.06 * (1 - tips) ** 1.5;
+      const cutBack = -0.68 + 0.06 * (1 - tips) ** 1.5;
       const cut = (cutSide + (cutBack - cutSide) * back) * (1 - front) + cutFront * front;
-      const cover = sm01(-0.035, 0.05, d.y - cut);
-      const thick = 0.02 + 0.02 * sm01(-0.2, 0.9, d.y) + 0.008 * front;
+      const above = d.y - cut;
+      const cover = sm01(-0.018, 0.03, above);
+      const hug = 0.3 + 0.7 * sm01(0.0, 0.32, above);                 // lock ends curl in toward the head
+      const groove = -0.009 * Math.abs(Math.cos(lon * 9 + d.y * 3.5 + 0.5 * Math.sin(lon * 3))) ** 8 * sm01(-0.2, 0.5, d.y);
+      const thick = (0.03 + 0.03 * sm01(-0.3, 0.85, d.y) + 0.008 * front) * hug + groove;
       const r = HR * 0.975 + cover * (HR * 0.025 + thick);
       p.setXYZ(i, d.x * r, d.y * r, d.z * r);
     }
     g.computeVertexNormals();
     face.add(new THREE.Mesh(g, C.hair));
   }
-  const onFace = (x, y, z, k = 1.0) => new THREE.Vector3(x, y, z).normalize().multiplyScalar(HR * k);
+  // ears: small flattened round ears at eye level, partly under the hair
   for (const sx of [-1, 1]) {
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.017, 12, 10), C.eye);
-    eye.scale.set(1, 1.2, 0.5);
-    eye.position.copy(onFace(0.3 * sx, -0.06, 0.95, 0.995));
+    const ear = new THREE.Mesh(new THREE.SphereGeometry(0.058, 40, 28), C.skin);
+    ear.scale.set(0.62, 1.0, 0.85);
+    ear.position.set(sx * HR * 1.0, -0.05, -0.025);
+    face.add(ear);
+  }
+  const onFace = (x, y, z, k = 1.0) => new THREE.Vector3(x, y, z).normalize().multiplyScalar(HR * k);
+  const facing = (m, v) => m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), v.clone().normalize());
+  for (const sx of [-1, 1]) {                                 // small glossy oval eyes, set low and wide
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.019, 32, 24), C.eye);
+    eye.scale.set(0.9, 1.25, 0.5);
+    eye.position.copy(onFace(0.34 * sx, -0.17, 0.92, 0.997));
+    facing(eye, eye.position);
     face.add(eye);
   }
-  const nose = new THREE.Mesh(new THREE.SphereGeometry(0.02, 12, 10), C.skin);
-  nose.scale.set(1, 0.9, 0.8);
-  nose.position.copy(onFace(0, -0.22, 0.97, 0.995));
+  const nose = new THREE.Mesh(new THREE.SphereGeometry(0.012, 20, 14), C.skin);   // barely-there nose (reads in profile)
+  nose.scale.set(1, 0.8, 0.75);
+  nose.position.copy(onFace(0, -0.27, 0.96, 0.997));
   face.add(nose);
-  const mouth = new THREE.Mesh(new THREE.CapsuleGeometry(0.0045, 0.022, 3, 8), C.eye);
-  mouth.rotation.z = Math.PI / 2;
-  mouth.position.copy(onFace(0, -0.42, 0.9, 0.995));
-  face.add(mouth);
+  {                                                           // small soft smile
+    const A = Math.PI * 0.62, sg = new THREE.TorusGeometry(0.021, 0.0042, 12, 40, A);
+    sg.rotateZ(-Math.PI / 2 - A / 2);
+    const smile = new THREE.Mesh(sg, C.eye);
+    const at = onFace(0, -0.36, 0.93, 0.996);
+    facing(smile, at);
+    smile.position.copy(at).add(new THREE.Vector3(0, 0.021, 0).applyQuaternion(smile.quaternion));
+    face.add(smile);
+  }
   const neckSkin = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.062, 0.12, 20), C.skin);
   neckSkin.position.y = 0.02;
   neck.add(neckSkin);
 
-  // ---------- hoodie body (separate garment with volume) ----------
+  // ---------- hoodie body: one soft rounded shell, long enough to cover the hips, ribbed hem band ----------
   const prof = (pts) => pts.map(([r, y]) => new THREE.Vector2(r, y));
+  const HB = { sx: 1.13, sz: 0.85 };
   const hoodieBody = new THREE.Mesh(new THREE.LatheGeometry(prof([
-    [0.198, -0.07], [0.203, -0.03], [0.2, 0.06], [0.205, 0.16], [0.212, 0.26], [0.205, 0.34],
-    [0.18, 0.41], [0.13, 0.46], [0.085, 0.485],
-  ]), 40), C.hoodie);
-  hoodieBody.scale.set(1.13, 1, 0.8);
+    [0.19, -0.152], [0.203, -0.166], [0.216, -0.161], [0.222, -0.142], [0.221, -0.12], [0.215, -0.111],
+    [0.217, -0.1], [0.221, -0.06], [0.219, 0.04], [0.219, 0.16], [0.221, 0.25], [0.214, 0.315],
+    [0.199, 0.37], [0.176, 0.41], [0.146, 0.442], [0.113, 0.466], [0.09, 0.481], [0.078, 0.495],
+    [0.068, 0.5], [0.06, 0.492],
+  ].map(([r, y]) => [r, TY(y)])), 96), C.hoodie);
+  hoodieBody.scale.set(HB.sx, 1, HB.sz);
   torso.add(hoodieBody);
-  const hem = new THREE.Mesh(new THREE.TorusGeometry(0.2, 0.024, 10, 40), C.hoodieRib);
-  hem.rotation.x = Math.PI / 2; hem.scale.set(1.13, 0.8, 1); hem.position.y = -0.065;
-  torso.add(hem);
-  const collar = new THREE.Mesh(new THREE.TorusGeometry(0.1, 0.036, 12, 28), C.hoodieRib);
-  collar.rotation.x = Math.PI / 2 - 0.12; collar.scale.set(1.08, 1, 1); collar.position.set(0, 0.47, -0.01);
-  torso.add(collar);
-  const hood = new THREE.Mesh(new THREE.SphereGeometry(0.15, 28, 20), C.hoodie);   // folded hood resting on the back
-  hood.scale.set(1.3, 0.72, 0.62); hood.position.set(0, 0.43, -0.13); hood.rotation.x = -0.25;
-  torso.add(hood);
+  // ---------- folded hood: a thick soft roll around the neck (V at the front) + the hood lying folded on the back ----------
   {
-    const w = 0.24, h = 0.1, r = 0.035, sh = new THREE.Shape();
-    sh.moveTo(-w / 2 + r, -h / 2); sh.lineTo(w / 2 - r, -h / 2); sh.quadraticCurveTo(w / 2, -h / 2, w / 2, -h / 2 + r);
-    sh.lineTo(w / 2 - 0.02, h / 2 - r); sh.quadraticCurveTo(w / 2 - 0.02, h / 2, w / 2 - 0.02 - r, h / 2);
-    sh.lineTo(-w / 2 + 0.02 + r, h / 2); sh.quadraticCurveTo(-w / 2 + 0.02, h / 2, -w / 2 + 0.02, h / 2 - r);
-    sh.lineTo(-w / 2, -h / 2 + r); sh.quadraticCurveTo(-w / 2, -h / 2, -w / 2 + r, -h / 2);
-    const pg = new THREE.ExtrudeGeometry(sh, { depth: 0.008, bevelEnabled: true, bevelThickness: 0.006, bevelSize: 0.006, bevelSegments: 3, curveSegments: 6 });
-    const pocket = new THREE.Mesh(pg, C.hoodie);
-    pocket.position.set(0, 0.07, 0.157); pocket.rotation.x = -0.05;
+    const A = Math.PI * 1.4, R = 0.13, pts = [];
+    for (let k = 0; k <= 32; k++) {
+      const th = Math.PI / 2 - A / 2 + (A * k) / 32, z = -R * Math.sin(th);
+      pts.push(new THREE.Vector3(1.16 * R * Math.cos(th), -0.075 * Math.max(0, z / R) ** 1.3, z));
+    }
+    const curve = new THREE.CatmullRomCurve3(pts);
+    const TS = 140, RS = 32, rim = new THREE.TubeGeometry(curve, TS, 0.056, RS, false), rp = rim.attributes.position, c = new THREE.Vector3();
+    for (let j = 0; j <= TS; j++) {
+      const u = j / TS, k = 0.2 + 0.8 * sm01(0, 0.3, u) * sm01(1, 0.7, u);
+      curve.getPointAt(u, c);
+      for (let i = 0; i <= RS; i++) {
+        const n = j * (RS + 1) + i;
+        rp.setXYZ(n, c.x + (rp.getX(n) - c.x) * k, c.y + (rp.getY(n) - c.y) * k, c.z + (rp.getZ(n) - c.z) * k);
+      }
+    }
+    rim.computeVertexNormals();
+    const hoodRim = new THREE.Mesh(rim, C.hoodie);
+    hoodRim.position.set(0, TY(0.458), -0.018); hoodRim.rotation.x = 0.16;   // back sits higher than the front
+    torso.add(hoodRim);
+    const hg = new THREE.SphereGeometry(1, 72, 48), hp = hg.attributes.position;   // the hood itself, folded on the upper back:
+    for (let i = 0; i < hp.count; i++) {                                         // a soft teardrop narrowing to a rounded point
+      const y = hp.getY(i), lo = Math.max(0, -y);
+      hp.setXYZ(i, hp.getX(i) * (1 - 0.45 * lo * lo), y * (1 + 0.35 * lo), hp.getZ(i) * (1 - 0.25 * lo));
+    }
+    hg.computeVertexNormals();
+    const back = new THREE.Mesh(hg, C.hoodie);
+    back.scale.set(0.215, 0.14, 0.088); back.position.set(0, TY(0.38), -0.165); back.rotation.x = 0.3;
+    torso.add(back);
+  }
+  // ---------- kangaroo pocket: a large puffy trapezoid pad with slanted openings, wrapped on the belly ----------
+  {
+    const g = new THREE.SphereGeometry(1, 96, 48), p = g.attributes.position;
+    const spow = (v, e) => Math.sign(v) * Math.abs(v) ** e;
+    const a = 0.219 * HB.sx, b = 0.219 * HB.sz;
+    for (let i = 0; i < p.count; i++) {
+      let x = spow(p.getX(i), 0.38), y = spow(p.getY(i), 0.38), z = p.getZ(i);
+      x *= 0.178 * (1 - 0.24 * (y + 1) / 2); y *= 0.088; z *= 0.034;
+      z += b * Math.sqrt(Math.max(0, 1 - (x / a) ** 2)) - b;
+      p.setXYZ(i, x, y, z);
+    }
+    g.computeVertexNormals();
+    const pocket = new THREE.Mesh(g, C.hoodie);
+    pocket.position.set(0, 0.0, b + 0.004);
     torso.add(pocket);
   }
+  // drawstrings: thick soft cords from the hood opening down the chest, with knotted ends
   for (const sx of [-1, 1]) {
-    const cord = new THREE.Mesh(new THREE.CylinderGeometry(0.0055, 0.0055, 0.12, 6), C.cord);
-    cord.position.set(0.035 * sx, 0.39, 0.145); cord.rotation.x = -0.18;
-    torso.add(cord);
-    const tip = new THREE.Mesh(new THREE.CapsuleGeometry(0.008, 0.016, 3, 6), C.cord);
-    tip.position.set(0.035 * sx, 0.32, 0.158);
-    torso.add(tip);
+    const x = 0.042 * sx;
+    const cc = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(x, TY(0.452), 0.118), new THREE.Vector3(x * 1.05, TY(0.39), 0.172), new THREE.Vector3(x * 1.1, TY(0.27), 0.19),
+    ]);
+    torso.add(new THREE.Mesh(new THREE.TubeGeometry(cc, 40, 0.0085, 14, false), C.cord));
+    const knot = new THREE.Mesh(new THREE.SphereGeometry(0.016, 24, 16), C.cord);
+    knot.scale.set(1, 1.25, 1); knot.position.set(x * 1.1, TY(0.262), 0.192);
+    torso.add(knot);
   }
 
   // ---------- pants waist (separate garment) ----------
@@ -1328,82 +1389,82 @@ function buildSkater() {
   waist.scale.set(1.12, 1, 0.92);
   pelvis.add(waist);
 
-  // ---------- smooth limbs: one skinned tube per sleeve / trouser leg ----------
-  // Bones sit inside the existing joint groups, so the tube bends with the same
-  // shoulder/elbow and hip/knee rotations the animations already drive.
+  // ---------- smooth limbs: one skinned tube per sleeve / trouser leg / boot shaft ----------
+  // Bones sit inside the existing joint groups, so the tubes bend with the same
+  // shoulder/elbow and hip/knee/ankle rotations the animations already drive.
+  // The top of each sleeve / trouser leg is a round dome centred exactly on the joint
+  // pivot and bound only to that joint, so it stays a perfect ball however far the
+  // joint turns (round shoulders and hips that never pinch or twist).
+  const HAND_R = 0.088;
   const limbs = [];
-  const tube = (profile, y0, y1, rings, radial, endInner) => {
-    const pos = [], uv = [], ys = [], idx = [];
-    for (let j = 0; j <= rings; j++) {
-      const y = y0 + (y1 - y0) * (j / rings), r = profile(y);
+  // surface of revolution from [y, r] samples (top → bottom); normals come from the
+  // profile itself so the dome poles and rolled hems shade smoothly
+  const tube = (samples, radial) => {
+    const pos = [], nor = [], uv = [], ys = [], idx = [], n = samples.length;
+    for (let j = 0; j < n; j++) {
+      const [y, r] = samples[j];
+      const [ya, ra] = samples[Math.max(0, j - 1)], [yb, rb] = samples[Math.min(n - 1, j + 1)];
+      let nr = -(yb - ya), ny = rb - ra; const nl = Math.hypot(nr, ny) || 1; nr /= nl; ny /= nl;
       for (let i = 0; i < radial; i++) {
-        const a = (i / radial) * Math.PI * 2;
-        pos.push(Math.cos(a) * r, y, Math.sin(a) * r); uv.push(i / radial, j / rings); ys.push(y);
+        const a = (i / radial) * Math.PI * 2, ca = Math.cos(a), sa = Math.sin(a);
+        pos.push(ca * r, y, sa * r); nor.push(ca * nr, ny, sa * nr); uv.push(i / radial, j / (n - 1)); ys.push(y);
       }
     }
-    // rolled hem / cuff: an inward annulus gives the garment visible thickness at the opening
-    const base = pos.length / 3;
-    for (let i = 0; i < radial; i++) {
-      const a = (i / radial) * Math.PI * 2;
-      pos.push(Math.cos(a) * endInner, y1, Math.sin(a) * endInner); uv.push(i / radial, 1); ys.push(y1);
-    }
-    for (let j = 0; j < rings; j++) for (let i = 0; i < radial; i++) {
+    for (let j = 0; j < n - 1; j++) for (let i = 0; i < radial; i++) {
       const a = j * radial + i, b = j * radial + ((i + 1) % radial), c = a + radial, d = b + radial;
-      idx.push(a, c, b, b, c, d);
-    }
-    const last = rings * radial;
-    for (let i = 0; i < radial; i++) {
-      const a = last + i, b = last + ((i + 1) % radial), c = base + i, d = base + ((i + 1) % radial);
-      idx.push(a, c, b, b, c, d);
+      idx.push(a, b, c, b, d, c);              // outward-facing
     }
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
     g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
     g.setIndex(idx);
     return { g, ys };
   };
-  const skinLimb = (frame, anchorParent, upper, lower, profile, y0, y1, endInner, weights, mat) => {
-    const bA = new THREE.Bone(), bU = new THREE.Bone(), bL = new THREE.Bone();
-    anchorParent.add(bA); upper.add(bU); lower.add(bL);
-    const { g, ys } = tube(profile, y0, y1, 34, 18, endInner);
+  const dome = (R, steps = 20) => {                         // hemisphere cap centred on the joint pivot
+    const s = [];
+    for (let k = 0; k <= steps; k++) { const t = (Math.PI / 2) * (1 - k / steps); s.push([R * Math.sin(t), Math.max(R * Math.cos(t), 1e-4)]); }
+    return s;
+  };
+  // frame: joint group the samples are written in; joints: bone parents; weights(y) → one weight per joint
+  const skinLimb = (frame, joints, samples, weights, mat) => {
+    const bones = joints.map((j) => { const b = new THREE.Bone(); j.add(b); return b; });
+    const { g, ys } = tube(samples, 48);
     const si = [], sw = [];
-    for (const y of ys) { const w = weights(y); si.push(0, 1, 2, 0); sw.push(w[0], w[1], w[2], 0); }
+    for (const y of ys) {
+      const w = weights(y), s = w.reduce((a, b) => a + b, 0);
+      for (let k = 0; k < 4; k++) { si.push(k < w.length ? k : 0); sw.push(k < w.length ? w[k] / s : 0); }
+    }
     g.setAttribute('skinIndex', new THREE.Uint16BufferAttribute(si, 4));
     g.setAttribute('skinWeight', new THREE.Float32BufferAttribute(sw, 4));
     const mesh = new THREE.SkinnedMesh(g, mat);
     mesh.frustumCulled = false;
-    limbs.push({ mesh, frame, bones: [bA, bU, bL] });
+    limbs.push({ mesh, frame, bones });
     root.add(mesh);
   };
-  const norm3 = (a, b, c) => { const s = a + b + c; return [a / s, b / s, c / s]; };
 
   const arm = (side) => {
     const shoulder = new THREE.Group();
-    shoulder.position.set(0.25 * side, 0.36, 0);
+    shoulder.position.set(0.25 * side, 0.311, 0);   // = TY(0.36)
     torso.add(shoulder);
     const elbow = new THREE.Group();
     elbow.position.y = -L.upper;
     shoulder.add(elbow);
-    // sleeve: shoulder → wrist, gently tapered, relaxed fit, ribbed cuff
-    const sleeveR = (y) => {
-      let r = 0.078 + (0.064 - 0.078) * sm01(0.04, -0.25, y);
-      r += (0.06 - r) * sm01(-0.25, -0.43, y);
-      r += 0.006 * sm01(-0.43, -0.45, y);                     // cuff
-      return r;
-    };
-    skinLimb(shoulder, torso, shoulder, elbow, sleeveR, 0.05, -0.465, 0.042,
-      (y) => { const t = 0.6 * sm01(-0.03, 0.05, y), f = sm01(-0.205, -0.295, y); return norm3(t, (1 - t) * (1 - f), (1 - t) * f); },
-      C.hoodie);
-    // hand: simple soft mitten with a thumb, at the wrist
+    // sleeve: round shoulder ball → one even, plump thickness all the way → ribbed cuff band → soft rolled edge
+    skinLimb(shoulder, [shoulder, elbow], [
+      ...dome(0.095),
+      [-0.027, 0.094], [-0.072, 0.09], [-0.117, 0.088], [-0.225, 0.088], [-0.324, 0.087], [-0.3735, 0.086],
+      [-0.3852, 0.081], [-0.396, 0.08], [-0.4095, 0.079], [-0.4176, 0.074], [-0.4221, 0.066], [-0.4203, 0.058],
+    ], (y) => { const f = sm01(-0.1755, -0.2745, y); return [1 - f, f]; }, C.hoodie);
+    // elbow filler: a ball on the pivot keeps the bend full instead of pinching
+    elbow.add(new THREE.Mesh(new THREE.SphereGeometry(0.085, 32, 24), C.hoodie));
+    // hand: one big smooth ball coming out of the cuff (no fingers, no thumb) — same size as the ears
     const hand = new THREE.Group();
     hand.position.y = -L.fore;
     elbow.add(hand);
-    const palm = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 14), C.skin);
-    palm.scale.set(0.042, 0.068, 0.028); palm.position.y = -0.055;
+    const palm = new THREE.Mesh(new THREE.SphereGeometry(HAND_R, 48, 36), C.skin);
+    palm.position.y = -0.05;
     hand.add(palm);
-    const thumb = new THREE.Mesh(new THREE.CapsuleGeometry(0.013, 0.03, 4, 8), C.skin);
-    thumb.position.set(-0.012 * side, -0.035, 0.026); thumb.rotation.set(0.5, 0, 0.35 * side);
-    hand.add(thumb);
     return { shoulder, elbow };
   };
   const leg = (side) => {
@@ -1416,29 +1477,46 @@ function buildSkater() {
     const ankle = new THREE.Group();
     ankle.position.y = -L.shin;
     knee.add(ankle);
-    // trouser leg: hip → ankle, relaxed (not leggings), slight break over the boot
-    const legR = (y) => {
-      let r = 0.104 + (0.088 - 0.104) * sm01(0.0, -0.36, y);
-      r += (0.08 - r) * sm01(-0.36, -0.6, y);
-      r += 0.005 * sm01(-0.6, -0.65, y);
-      return r;
+    // trouser leg and boot shaft share ONE weight curve (hip → knee → ankle), so the
+    // shaft always bends exactly like the trouser hem around it and can never poke out
+    const legW = (y) => {
+      const f = sm01(-0.31, -0.41, y), a = sm01(-0.46, -0.62, y);
+      return [1 - f, f * (1 - a), a];
     };
-    skinLimb(hip, pelvis, hip, knee, legR, 0.07, -0.655, 0.062,
-      (y) => { const t = 0.7 * sm01(-0.04, 0.06, y), f = sm01(-0.31, -0.41, y); return norm3(t, (1 - t) * (1 - f), (1 - t) * f); },
-      C.pants);
-    // skate (unchanged design): white boot + silver blade with toe pick
-    const boot = new THREE.Mesh(new THREE.CapsuleGeometry(0.075, 0.12, 5, 12), C.boot);
-    boot.rotation.x = Math.PI / 2; boot.scale.set(0.95, 1, 0.9); boot.position.set(0, -0.045, 0.04);
+    // trouser leg: round hip ball → relaxed leg → slightly wider soft hem resting on the boot
+    skinLimb(hip, [hip, knee, ankle], [
+      ...dome(0.108),
+      [-0.05, 0.108], [-0.15, 0.106], [-0.3, 0.104], [-0.36, 0.103], [-0.42, 0.106], [-0.48, 0.111],
+      [-0.53, 0.116], [-0.552, 0.118], [-0.563, 0.115], [-0.569, 0.11], [-0.567, 0.105],
+    ], legW, C.pants);
+    // knee filler (same idea as the elbow)
+    knee.add(new THREE.Mesh(new THREE.SphereGeometry(0.099, 32, 24), C.pants));
+    // skate: high-top round boot — shaft visible under the trouser hem, round toe cap — on a silver
+    // blade holder with two windows and a curved runner + toe pick (runner bottom = same ice contact height)
+    skinLimb(hip, [hip, knee, ankle], [
+      [-0.48, 0.0005], [-0.481, 0.045], [-0.486, 0.07], [-0.494, 0.086], [-0.505, 0.095], [-0.517, 0.099],
+      [-0.6, 0.1], [-0.66, 0.1], [-0.7, 0.097], [-0.73, 0.085], [-0.75, 0.06], [-0.758, 0.0005],
+    ], legW, C.boot);
+    const boot = new THREE.Mesh(new THREE.CapsuleGeometry(0.093, 0.12, 16, 40), C.boot);
+    boot.rotation.x = Math.PI / 2; boot.scale.set(1, 1, 0.92); boot.position.set(0, 0.012, 0.045);
     ankle.add(boot);
-    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.078, 0.082, 0.12, 16), C.boot);
-    shaft.position.y = 0.01;
-    ankle.add(shaft);
-    const blade = new THREE.Mesh(new THREE.BoxGeometry(0.014, 0.035, 0.3), C.blade);
-    blade.position.set(0, -L.foot + 0.0175, 0.03); // blade edge rests on the ice
-    ankle.add(blade);
-    const pick = new THREE.Mesh(new THREE.BoxGeometry(0.014, 0.03, 0.03), C.blade);
-    pick.position.set(0, -L.foot + 0.012, 0.19); pick.rotation.x = 0.6;
-    ankle.add(pick);
+    {
+      const B = -L.foot;                                       // blade runner bottom (on the ice)
+      const o = [[-0.15, B + 0.012], [-0.14, B + 0.002], [-0.12, B], [0.14, B], [0.17, B + 0.004], [0.19, B + 0.014],
+        [0.2, B + 0.028], [0.192, B + 0.036], [0.165, B + 0.03], [0.13, -0.06], [-0.09, -0.06], [-0.13, B + 0.03], [-0.148, B + 0.024]];
+      const sh = new THREE.Shape(o.map(([z, y]) => new THREE.Vector2(z, y)));
+      const win = (z0, z1, y0, y1, r) => {
+        const h = new THREE.Path();
+        h.moveTo(z0 + r, y0); h.lineTo(z1 - r, y0); h.quadraticCurveTo(z1, y0, z1, y0 + r); h.lineTo(z1, y1 - r);
+        h.quadraticCurveTo(z1, y1, z1 - r, y1); h.lineTo(z0 + r, y1); h.quadraticCurveTo(z0, y1, z0, y1 - r); h.lineTo(z0, y0 + r);
+        h.quadraticCurveTo(z0, y0, z0 + r, y0);
+        return h;
+      };
+      sh.holes.push(win(-0.075, -0.012, B + 0.014, -0.074, 0.01), win(0.012, 0.085, B + 0.014, -0.074, 0.01));
+      const hg = new THREE.ExtrudeGeometry(sh, { depth: 0.012, bevelEnabled: true, bevelThickness: 0.003, bevelSize: 0.0025, bevelSegments: 3, curveSegments: 10 });
+      hg.translate(0, 0, -0.006); hg.rotateY(-Math.PI / 2);   // profile drawn in (z, y); thickness along x
+      ankle.add(new THREE.Mesh(hg, C.blade));
+    }
     return { hip, knee, ankle };
   };
 
@@ -1454,8 +1532,7 @@ function buildSkater() {
   root.updateMatrixWorld(true);
   for (const { mesh, frame, bones } of limbs) {
     const m = new THREE.Matrix4().copy(mesh.matrixWorld).invert().multiply(frame.matrixWorld);
-    mesh.geometry.applyMatrix4(m);
-    mesh.geometry.computeVertexNormals();
+    mesh.geometry.applyMatrix4(m);                       // (normals move with it)
     mesh.bind(new THREE.Skeleton(bones));
   }
   root.traverse((o) => { if (o.isMesh) o.castShadow = false; });
