@@ -4,6 +4,10 @@
 !/.gitignore
 !/CLAUDE.md
 !/preview.html
+!/PROJECT_CONTEXT.md
+!/references/
+/references/*
+!/references/character-reference.jpg
 !/winter-rink/
 
 # never commit
