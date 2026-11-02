@@ -1940,6 +1940,7 @@ class PlaceholderPlayer {
   }
 
   update(dt) {
+    if (this.spin) { this.target = null; this._applySpin(dt); return; }   // Spin: input paused until it finishes
     const k = this.keys;
     const ix = (k.has('KeyD') || k.has('ArrowRight') ? 1 : 0) - (k.has('KeyA') || k.has('ArrowLeft') ? 1 : 0);
     const iz = (k.has('KeyS') || k.has('ArrowDown') ? 1 : 0) - (k.has('KeyW') || k.has('ArrowUp') ? 1 : 0);
@@ -1999,7 +2000,7 @@ class PlaceholderPlayer {
 
   // ---- Triple Axel (≈3 s): prep 0.5 s → air + 1080° spin 1.5 s → landing 1 s ----
   startTripleAxel(onEnd) {
-    if (this.trick) return false;
+    if (this.trick || this.spin) return false;
     const v = this.velocity;
     if (v.length() > 9) v.setLength(9);    // enter the jump at the original speed range so it plays exactly as before
     if (v.length() < 1.0) v.set(Math.sin(this.heading), 0, Math.cos(this.heading)).multiplyScalar(1.0); // gentle creep into the prep
@@ -2042,8 +2043,10 @@ class PlaceholderPlayer {
     // flight: height + exactly 3 turns about the vertical axis
     const u = clamp01((t - PREP) / AIR);
     const jumpY = 1.5 * (4 * u * (1 - u)) ** 2;                        // 0.46 m → 1.5 m (mid-spin) → 0.46 m
-    const us = clamp01((u - 1 / 6) / (2 / 3));                         // 1.0 s window: same speed as before, one more turn
-    const e = us * us * us * (us * (us * 6 - 15) + 10);                // fast in the middle
+    // rotation window widened to u 0.08–0.92 with a stronger in-out ease (7th-order smoothstep): the turns start
+    // and finish more gently like a real jump, peak turn rate ~7% lower than before
+    const us = clamp01((u - 0.08) / 0.84);
+    const e = us * us * us * us * (35 - 84 * us + 70 * us * us - 20 * us * us * us);
     const spin = Math.PI * 8 * e;                                      // exactly 1440° (4 turns)
 
     // ---- legs ----
@@ -2144,23 +2147,32 @@ class PlaceholderPlayer {
       const w0 = (1.0 * AIR) / 16 / rate(PREP);                       // take-off speed ≈ 1 m/s
       const w1 = 1 / rate(PREP + AIR);                                // touchdown speed = glide start speed
       const cFull = 3 * (1 - (w0 + w1) / 2);                           // extra speed concentrated in the spin
-      const sa = 1 / 6, sL = 2 / 3, xs = Math.min(Math.max(u - sa, 0), sL);
+      const sa = 0.08, sL = 0.84, xs = Math.min(Math.max(u - sa, 0), sL);   // same window as the rotation
       const B = w0 * sL + ((w1 - w0) * ((sa + sL) ** 2 - sa ** 2)) / 2; // base travel inside the spin window
-      const c = Math.max(0, 3 * ((B + cFull / 3) / 2 - B));             // → spin-phase travel halved
+      // spin-phase travel: 0.5 → 0.33 of the original (≈6.7 → ≈4.4 m on open ice); a negative c slows the
+      // forward glide smoothly in the middle of the rotation (never below ~70% of the base speed)
+      const c = 3 * ((B + cFull / 3) * 0.33 - B);
       const S = w0 * u + ((w1 - w0) * u * u) / 2 + c * (xs / 2 - (sL / (4 * Math.PI)) * Math.sin((2 * Math.PI * xs) / sL));
       T.S1 = (w0 + w1) / 2 + c / 3;                                    // fraction of T.dist covered by touchdown
-      // +0.5 m in the take-off posture (from leaving the ice to the start of the spin), eased in and out
-      T.extra = Math.min(0.5, Math.max(0, T.dist * (1 - T.S1)));
-      const ex = T.extra * sm(0, sa, u);
-      pos.x = T.takeoff.x + T.dir.x * (T.dist * S + ex);               // continuous travel through the whole flight
-      pos.z = T.takeoff.y + T.dir.y * (T.dist * S + ex);
+      T.extra = 0;                                                     // (the extra 0.5 m in the take-off posture was removed)
+      // same total distance as above (T.D), but the speed along it now eases in and out: leaves the ice at the
+      // approach speed (~1 m/s) and builds up smoothly, carries through the rotation, and slows into the landing
+      // (touchdown at 70% of the average flight speed) — cubic Hermite in u with those end slopes
+      T.D = T.dist * T.S1;
+      const s0 = Math.min(1, (1.0 * AIR) / Math.max(T.D, 0.05) / rate(PREP)), s1 = 0.7;
+      const u2 = u * u, u3 = u2 * u;
+      const H = -2 * u3 + 3 * u2 + (u3 - 2 * u2 + u) * s0 + (u3 - u2) * s1;
+      T.vLand = (T.D * s1 * rate(PREP + AIR)) / AIR;                   // real-time speed at touchdown
+      pos.x = T.takeoff.x + T.dir.x * T.D * H;                          // continuous travel through the whole flight
+      pos.z = T.takeoff.y + T.dir.y * T.D * H;
     } else if (T.takeoff && !T.landed) {
       T.landed = true;
-      pos.x = T.takeoff.x + T.dir.x * (T.dist * (T.S1 ?? 1) + (T.extra || 0)); // touch down at the end of the flight path
-      pos.z = T.takeoff.y + T.dir.y * (T.dist * (T.S1 ?? 1) + (T.extra || 0));
-      vel.set(T.dir.x, 0, T.dir.y).multiplyScalar(T.dist / AIR);          // carry the flight speed onto the ice
+      pos.x = T.takeoff.x + T.dir.x * (T.D ?? 0);                       // touch down at the end of the flight path
+      pos.z = T.takeoff.y + T.dir.y * (T.D ?? 0);
+      const vL = T.vLand ?? 1;
+      vel.set(T.dir.x, 0, T.dir.y).multiplyScalar(vL);                 // carry the touchdown speed onto the ice
       this.glideOut = true;                                            // long coast after the landing
-      const v0 = T.dist / AIR, GLIDE_DIST = 13.3, GLIDE_TIME = 5.45;   // 1.5 × 8.9 m
+      const v0 = vL, GLIDE_DIST = 13.3, GLIDE_TIME = 5.45;             // 1.5 × 8.9 m (shorter when landing slower)
       this.glideOutState = { t: 0, v0, time: GLIDE_TIME, p: Math.max(1.2, (v0 * GLIDE_TIME) / GLIDE_DIST - 1) };
     }
 
@@ -2176,6 +2188,122 @@ class PlaceholderPlayer {
       this.trick = null;
       if (T.onEnd) T.onEnd();
     }
+  }
+
+  // ---- Spin (≈10 s, own action — the Triple Axel above is untouched) ----
+  // Sit spin (support knee ≈100°, hips low, chest over the free leg, right hand on the free shin) → rises
+  // while the free leg sweeps up behind into a high catch-foot / Biellmann-style ring (right hand holding the
+  // free skate near head height, left arm reaching forward) → leg lowers, body uprights, arms close in →
+  // slows to a balanced stop, opens into a held T-pose, then eases back to his normal stance.
+  // Turn rate: slow start, ease-in to a very fast middle, ease-out to a stop (rotation ends at 9.7 s).
+  // Left foot is the spinning foot; every frame the pose is re-grounded so that blade sits exactly on the
+  // spin axis (the root) at the usual ice-contact height — no sliding, floating or sinking.
+  startSpin(onEnd) {
+    if (this.trick || this.spin) return false;
+    const rate = (t) => (0.12 * psSm(0, 0.9, t) + 0.88 * psSm(1.0, 4.6, t)) * (1 - psSm(6.6, 9.7, t));
+    let area = 0;
+    for (let t = 0; t < 10; t += 0.005) area += rate(t) * 0.005;
+    const turns = Math.max(1, Math.round((22 * area) / (Math.PI * 2)));        // peak ≈ 22 rad/s (≈3.5 turns/s)
+    this.spin = { t: 0, theta: 0, onEnd, rate, k: (turns * Math.PI * 2) / area, snap0: psSnap(this.rig) };
+    this.target = null;
+    this.glideOut = false;
+    return true;
+  }
+
+  _applySpin(dt) {
+    const S = this.spin, R = this.rig, L = R.L, END = 11.7;
+    S.t = Math.min(END, S.t + dt);
+    const t = S.t;
+    const mix = (a, b, w) => a + (b - a) * w;
+    // the run-in glide settles onto the spin axis
+    this.velocity.multiplyScalar(Math.exp(-6 * dt));
+    this.mesh.position.addScaledVector(this.velocity, dt);
+    S.theta += S.k * S.rate(t) * dt;
+
+    // ---- choreography weights ----
+    const wSit = psSm(0.4, 1.9, t) * (1 - psSm(3.9, 5.4, t));      // sit spin
+    const wHigh = psSm(4.3, 5.9, t) * (1 - psSm(7.5, 8.9, t));     // high leg (catch-foot ring)
+    const wT = psSm(9.0, 9.9, t);                                  // finishing T-pose (as the rotation comes to rest), held to 10.9 s
+    const wOut = psSm(10.9, 11.7, t);                              // then hand back to the normal skating pose
+    // upright spin (start and finish): legs together, free leg crossed in front, arms drawn in for speed
+    const P = {
+      pp: 0, sx: -0.03, sk: 0.08, fx: -0.28, fz: -0.04, fk: 0.45, fa: 0.45, tx: 0.06, nx: -0.04,
+      lx: -1.25, ly: 0, lz: 0.3, le: -1.5, rx: -1.25, ry: 0, rz: -0.3, re: -1.5,
+    };
+    const SIT = {   // support thigh near horizontal, knee 100°, free leg reaching forward, chest folded over it
+      pp: 0.3, sx: -1.32 - 0.3, sk: 1.75, fx: -1.5 - 0.3, fz: -0.12, fk: 0.22, fa: 0.5, tx: 0.62, nx: -0.55,
+      lx: -1.35, ly: 0, lz: 0.42, le: -0.15, rx: -1.0, ry: 0, rz: -0.2, re: -0.6,
+    };
+    const HIGH = {  // support straight, pelvis tipped forward, free thigh back, knee folded so the skate rises to the head
+      pp: 0.6, sx: -0.6, sk: 0.04, fx: 1.25, fz: -0.06, fk: 1.75, fa: 0.6, tx: 0.2, nx: -0.75,
+      lx: -2.35, ly: 0, lz: 0.25, le: -0.12, rx: -2.6, ry: 0, rz: -0.6, re: -0.4,
+    };
+    const Q = {};
+    const TP = {    // finish: upright and centred, legs together with both blades flat, arms straight out at shoulder height
+      pp: 0, sx: 0, sk: 0.03, fx: 0, fz: -0.03, fk: 0.03, fa: -0.03, tx: 0, nx: 0,
+      lx: 0, ly: 0, lz: Math.PI / 2, le: -0.06, rx: 0, ry: 0, rz: -Math.PI / 2, re: -0.06,
+    };
+    for (const k in P) Q[k] = mix(mix(mix(P[k], SIT[k], wSit), HIGH[k], wHigh), TP[k], wT);
+    const sup = R.legL, fr = R.legR;
+    R.body.rotation.set(0, 0, 0);
+    R.pelvis.rotation.set(Q.pp, 0, 0);
+    sup.hip.rotation.set(Q.sx, 0, 0.03); sup.knee.rotation.x = Q.sk;
+    sup.ankle.rotation.set(-(Q.pp + Q.sx + Q.sk), 0, 0);                  // blade flat on the ice
+    fr.hip.rotation.set(Q.fx, 0, Q.fz); fr.knee.rotation.x = Q.fk;
+    fr.ankle.rotation.set(Q.fa, 0, 0);                                    // pointed toe
+    R.torso.rotation.set(Q.tx, 0, 0); R.torso.scale.setScalar(1);
+    R.neck.rotation.set(Q.nx, 0, 0); R.head.rotation.set(0, 0, 0);
+    R.armL.shoulder.rotation.set(Q.lx, Q.ly, Q.lz); R.armL.elbow.rotation.set(Q.le, 0, 0);
+    R.armR.shoulder.rotation.set(Q.rx, Q.ry, Q.rz); R.armR.elbow.rotation.set(Q.re, 0, 0);
+    // right hand holds the free leg: the shin in the sit spin, the skate near the head in the high leg
+    const grip = wSit * (1 - psSm(3.9, 4.4, t)) + wHigh * psSm(5.3, 5.9, t);   // lets go of the shin as he rises, catches the skate once it is up
+    if (grip > 0.001) {
+      this._spinGround(1);
+      const onShin = fr.knee.localToWorld(new THREE.Vector3(-0.06, -0.16, 0.07));
+      const onBoot = fr.ankle.localToWorld(new THREE.Vector3(-0.07, 0.06, -0.02));
+      const pole = new THREE.Vector3(-0.5, -1, -0.2).lerp(new THREE.Vector3(-0.8, 0.6, 0.2), wHigh);
+      psArmIK(R, R.armR, -1, onShin.lerp(onBoot, wHigh / Math.max(1e-3, wSit + wHigh)), grip, pole);
+    }
+    // run-in: ease out of whatever pose he was skating in
+    psBlendTo(R, S.snap0, 1 - psSm(0, 0.8, t));
+    // run-out: blend into his normal skating pose (computed by the regular animation), no snap
+    if (wOut > 0) {
+      if (!S.rerooted) {
+        // the spin axis was the left blade; move the root under the body instead (nothing moves on screen),
+        // so the normal stance afterwards needs no foot slide
+        S.rerooted = true;
+        this.mesh.updateMatrixWorld(true);
+        const off = this.mesh.localToWorld(new THREE.Vector3(R.pelvis.position.x, 0, R.pelvis.position.z)).sub(this.mesh.position);
+        this.mesh.position.x += off.x; this.mesh.position.z += off.z;
+      }
+      R.pelvis.position.x = 0; R.pelvis.position.z = 0;
+      const spinPose = psSnap(R);
+      R.pelvis.rotation.set(0, 0, 0); R.pelvis.position.z = 0;
+      this._animate(dt, 0, 0);
+      psBlendTo(R, spinPose, 1 - wOut);
+    }
+    this._spinGround(wOut > 0 ? 0 : 1);
+    this.mesh.rotation.y = this.heading + S.theta;
+
+    if (t >= END) {
+      this.mesh.rotation.y = this.heading;                                // whole turns: facing exactly as before
+      R.pelvis.rotation.set(0, 0, 0); R.pelvis.position.z = 0;
+      this.velocity.set(0, 0, 0);
+      const cb = S.onEnd;
+      this.spin = null;
+      if (cb) cb();
+    }
+  }
+
+  // lowest blade at the usual ice-contact height; the spinning (left) blade centred on the root by `centre`
+  _spinGround(centre) {
+    const R = this.rig, v = new THREE.Vector3(), foot = (leg) => this.mesh.worldToLocal(leg.ankle.localToWorld(v.set(0, -R.L.foot, 0.03)).clone());
+    this.mesh.updateMatrixWorld(true);
+    const a = foot(R.legL), b = foot(R.legR);
+    R.pelvis.position.y += -0.02 - Math.min(a.y, b.y);
+    R.pelvis.position.x -= a.x * centre;
+    R.pelvis.position.z -= a.z * centre;
+    this.mesh.updateMatrixWorld(true);
   }
 
   setTarget(x, z) {
@@ -2765,7 +2893,7 @@ class PartnerSkating {
   handleTap(raycaster) {
     if (this.menuOpen) { this.closeMenu(); return true; }
     if (this.mode === 'dance') return true;                      // input paused during the performance
-    if (this.player.trick) return false;
+    if (this.player.trick || this.player.spin) return false;
     if (raycaster.intersectObject(this.pick, false).length) { this.openMenu(); return true; }
     return false;
   }
@@ -2774,7 +2902,7 @@ class PartnerSkating {
   get busy() { return this.mode === 'dance'; }
 
   start(mode) {
-    if (this.player.trick || this.mode === mode || this.mode === 'dance') return;
+    if (this.player.trick || this.player.spin || this.mode === mode || this.mode === 'dance') return;
     this.mode = mode;
     const H = this.H;
     H.active = true; H.locked = false; H.idleT = -1; H.lastMode = mode;
@@ -3238,7 +3366,7 @@ skateFx2.setViewportHeight(renderer.getDrawingBufferSize(new THREE.Vector2()).y)
 // ---- partner skating (click her: Help · Hold Hands · Dance) -----------------
 const partner = new PartnerSkating({
   player, her: skater2, bounds: world.bounds, camera, dom: renderer.domElement,
-  onBusy: (b) => { axelBtn.disabled = b; axelBtn.style.opacity = b ? '0.4' : '1'; },
+  onBusy: (b) => setActionBusy(b),
 });
 controls.onTap = (ray) => partner.handleTap(ray);
 
@@ -3246,7 +3374,7 @@ controls.onTap = (ray) => partner.handleTap(ray);
 const axelBtn = document.createElement('button');
 axelBtn.textContent = '트리플 악셀';
 axelBtn.style.cssText = [
-  'position:fixed', 'left:50%', 'bottom:22px', 'transform:translateX(-50%)', 'z-index:10',
+  'position:fixed', 'left:50%', 'bottom:22px', 'transform:translateX(calc(-100% - 5px))', 'z-index:10',   // Spin sits to its right
   'padding:9px 22px', 'border-radius:999px', 'border:1px solid rgba(243,217,184,.45)',
   'background:rgba(6,12,26,.55)', 'color:#f3d9b8', 'cursor:pointer',
   'font:300 13px/1 "Helvetica Neue", Arial, sans-serif', 'letter-spacing:.18em',
@@ -3255,11 +3383,28 @@ axelBtn.style.cssText = [
 axelBtn.addEventListener('click', () => {
   if (axelBtn.disabled) return;
   partner.cancel();                     // Help / Hold Hands: let go first, then jump
-  const started = player.startTripleAxel(() => { axelBtn.disabled = false; axelBtn.style.opacity = '1'; });
-  if (started) { axelBtn.disabled = true; axelBtn.style.opacity = '0.4'; }
+  const started = player.startTripleAxel(() => setActionBusy(false));
+  if (started) setActionBusy(true);
   axelBtn.blur();
 });
 document.body.appendChild(axelBtn);
+
+// ---- Spin button (same style, right next to the Triple Axel button) ---------------------
+const spinBtn = document.createElement('button');
+spinBtn.textContent = 'Spin';
+spinBtn.style.cssText = axelBtn.style.cssText;
+spinBtn.style.transform = 'translateX(5px)';
+spinBtn.addEventListener('click', () => {
+  if (spinBtn.disabled) return;
+  partner.cancel();                     // Help / Hold Hands: let go first, then spin
+  if (player.startSpin(() => setActionBusy(false))) setActionBusy(true);
+  spinBtn.blur();
+});
+document.body.appendChild(spinBtn);
+// one action at a time: while the Triple Axel, the Spin or the partner dance runs, both buttons rest
+function setActionBusy(b) {
+  for (const btn of [axelBtn, spinBtn]) { btn.disabled = b; btn.style.opacity = b ? '0.4' : '1'; }
+}
 
 // ---- post: HDR target with MSAA → bloom → tone mapping ---------------------
 const buf = renderer.getDrawingBufferSize(new THREE.Vector2());
