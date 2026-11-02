@@ -9,16 +9,24 @@
 ## 프로젝트
 
 - 이름: Magical Winter Forest Ice Rink
+- 저장소: `milly-lab/magical-winter-ice-rink` (private), 브랜치 `main`
 - 버전 이력:
-  - **Save Point 01** (안정 버전, 2026-10-31): GitHub 커밋 `2381899`
-  - 현재 작업본 (2026-11-01): Save Point 01 이후 카메라, 조작, 트리플 악셀, 스케이팅 효과, 캐릭터 리디자인이 더해진 `preview.html`. 커밋 여부는 `git log`로 확인한다.
-- 내용: Three.js로 만든 한밤 겨울 숲속 야외 아이스링크 3D 장면과 사용자가 조작하는 클레이 피규어 스케이터.
+  - **Save Point 01** (최초 안정 버전, 2026-10-31): GitHub 커밋 `2381899`
+  - **현재 세이브포인트: Save Point 13 – FPS fixed** (2026-11-02): GitHub 커밋 `f8bd573`
+  - 세이브포인트 01~13의 전체 이력은 `PROJECT_CONTEXT.md` 12장을 참고하고, 최신 커밋은 `git log`로 확인한다.
+- 내용: Three.js로 만든 한밤 겨울 숲속 야외 아이스링크 3D 장면. 사용자는 클레이 피규어 남자 스케이터를 조작하고, 두 번째 캐릭터(여자 스케이터)와 함께 스케이팅할 수 있다.
+- 사용자 작업 방식: 브라우저의 Claude(GitHub 연결)로 작업하고, 커밋과 push는 사용자가 **GitHub Desktop으로 직접** 한다. Claude Code CLI나 데스크톱 앱을 쓴다고 가정하지 않는다. 사용자는 초보자이므로 기술적인 단계는 쉽고 분명하게 설명한다.
 
 ## 기준 파일
 
-- `preview.html`: 현재 정상 작동 버전이자 기본 결과물(유일한 실행 파일).
-- `PROJECT_CONTEXT.md`: 인수인계 문서(맥락, 확정 수치, 주의 사항).
-- `references/character-reference.jpg`: 캐릭터 형태 레퍼런스. 의상은 따르지 않고 흰 후드티, 검은 바지, 흰 스케이트를 유지한다.
+- `preview.html`: 현재 정상 작동 버전이자 기본 결과물(유일한 실행 파일). 크리스마스트리 GLB(축소본)와 배경 이미지가 base64로 내장되어 있어 약 6MB다.
+- `PROJECT_CONTEXT.md`: 인수인계 문서(맥락, 확정 수치, 주의 사항, 미해결 문제, 미검증 항목).
+- `references/character-reference.jpg`: 캐릭터 형태 레퍼런스(형태·얼굴·머리·비율만 참고). 의상은 따르지 않는다. 현재 의상은 다음과 같다.
+  - 남자: 아이보리 터틀넥 니트, 검은 바지, 흰 스케이트
+  - 여자: 같은 아이보리 니트, 검은 A라인 미니스커트, 아이보리 귀마개, 흰 스케이트
+- `references/character-sheet.png`, `references/ice-skater.png`: 추가 캐릭터 참고 이미지.
+- `assets/christmas-tree.glb`: 중앙 트리 원본 모델(78.7MB). `preview.html`에는 축소본이 내장되어 있어서 실행할 때 이 파일을 불러오지 않는다.
+- `assets/winter-birch.glb`: 자작나무 모델. 현재 `preview.html`에서 사용하지 않는다.
 - `winter-rink/`: 이후의 실험적 수정본(낙엽수 숲, 새 얼음 셰이더, 모바일 대응 등)이며 적용되지 않은 버전이다. 사용자가 요청하지 않으면 참고하거나 반영하지 않는다.
 
 ## 실행 방법
@@ -29,7 +37,9 @@
   - WASD 또는 방향키로 이동한다(월드 축 기준).
   - 클릭이나 탭으로 해당 지점까지 이동한다.
   - 드래그로 카메라를 돌리고, 휠이나 핀치로 줌한다.
-  - 하단의 '트리플 악셀' 버튼으로 점프한다.
+  - 하단의 '트리플 악셀' 버튼으로 점프하고, 'Spin' 버튼으로 스핀한다. 한 번에 하나의 동작만 실행된다.
+  - 여자 캐릭터를 클릭하면 Help · Hold Hands · Dance 메뉴가 열린다. Help와 Hold Hands는 'Let Go' 버튼이나 `Esc`로 손을 놓는다.
+  - 오른쪽 위에 FPS 카운터가 표시된다.
 
 ## preview.html 내부 구조
 
@@ -37,23 +47,25 @@
 
 | 섹션 | 역할 |
 |---|---|
-| world/config.js | 링크 크기, 색상, 조명 세기, 블룸 값 등 환경 설정값 |
+| world/config.js | 캡슐형 링크 크기(약 133×67m)와 형상 함수, 색상, 조명 세기, 블룸 값 등 환경 설정값 |
 | world/warmGlow.js | 전구 빛이 눈과 잎에 은은하게 번지는 효과(셰이더 주입) |
 | world/bulbs.js | 모든 전구를 Points 하나로 그리는 발광 스프라이트 |
-| world/sky.js | 짙은 네이비 밤하늘, 희미한 별, 작은 달 |
+| world/sky.js | 짙은 네이비 밤하늘 돔, 희미한 별, 작은 달 |
+| world/backdrop.js | 배경 이미지 띠(별이 뜬 밤하늘 + 멀리 흐릿한 도시 스카이라인)를 링크 바깥 원통에 4번 반복 |
 | world/firTree.js | 전나무 형태(원뿔 층), 전구 감기 로직 |
 | world/ground.js | 눈밭, 펜스와 나무 밑동의 눈더미 |
 | world/iceRink.js | 반사 얼음(Reflector + 커스텀 셰이더), 펜스, 펜스 위 전구 |
-| world/christmasTree.js | 중앙 대형 트리, 전구 약 1,700개, 별, 눈 섬 |
+| world/christmasTree.js | 중앙 트리(사용자의 GLB 모델 내장, 조명 77개는 발광 전구로 대체), 은빛 눈송이 토퍼 |
 | world/forest.js | 외곽 전나무 22그루와 전구 |
-| world/lights.js | PointLight 7개, 반구광, 달빛 |
+| world/lights.js | PointLight 15개, 반구광, 달빛, 캐릭터 전용 보조광(`addSoftFill`) |
 | world/snowfall.js | 내리는 눈 |
 | world/index.js | `createWinterWorld()`: 위 요소를 장면에 조립 |
 | camera/followCamera.js | 3인칭 팔로우 카메라(뒤 3m·위 1.7m), 드래그 회전·줌 |
-| player/PlaceholderPlayer.js | 실제 캐릭터(`buildSkater` 클레이 피규어 + 스킨드 팔다리), 이동·가속, 스케이팅 애니메이션, 트리플 악셀 |
+| player/PlaceholderPlayer.js | 실제 캐릭터(`buildSkater`: 남자 / `style: 'girl'` 여자, 공유 rig + 스킨드 팔다리), 이동·가속, 스케이팅 애니메이션, 트리플 악셀, 스핀 |
 | input/pointerControls.js | 마우스·터치: 드래그 회전, 휠·핀치 줌, 클릭·탭 이동, 목표 마커 |
-| fx/skateFx.js | 얼음가루 파티클 + 스케이트 날 자국 |
-| main.js | 렌더러, 블룸 후처리, 리사이즈, 트리플 악셀 버튼, 애니메이션 루프 |
+| fx/skateFx.js | 얼음가루 파티클 + 스케이트 날 자국(캐릭터마다 하나씩) |
+| partner/partnerSkating.js | 파트너 인터랙션(Help · Hold Hands · Dance), 메뉴·Let Go 버튼, 손잡기 IK |
+| main.js | 렌더러, 블룸 후처리, 리사이즈, 여자 캐릭터 배치, 트리플 악셀·Spin 버튼, 고정 시간 간격(1/240초) 게임 루프, FPS 카운터 |
 
 ## 작업 규칙
 
