@@ -3430,23 +3430,59 @@ function onResize() {
 window.addEventListener('resize', onResize);
 
 // ---- loop ------------------------------------------------------------------
+// Fixed-step simulation (2026-11-02): gameplay (skating physics, Triple Axel, Spin, partner skating) advances in
+// small fixed steps of 1/240 s taken from an accumulator, so it keeps real-time speed at any frame rate (it used to
+// slow down below 20 FPS because each frame was capped at 0.05 s). At most 0.25 s of real time is caught up per
+// frame (longer pauses, e.g. a background tab, are dropped instead of building a backlog). The camera, tap marker,
+// ice dust / blade marks and world effects still update once per rendered frame with the time actually simulated,
+// exactly as before, so their look is unchanged.
+const SIM_STEP = 1 / 240, MAX_CATCH_UP = 0.25;
+let simAcc = 0;
 let last = performance.now();
 const start = last;
-function simulate(dt, t) {
-  if (!partner.preUpdate(dt)) player.update(dt);   // the dance drives the player itself; otherwise normal control
-  partner.postUpdate(dt);
-  cine.update(dt, player.position, player.heading);
-  controls.update(dt);
-  skateFx.update(dt);
-  skateFx2.update(dt);
+function simulate(frameDt, t) {
+  simAcc += Math.min(frameDt, MAX_CATCH_UP);
+  let dt = 0;
+  while (simAcc >= SIM_STEP) {
+    if (!partner.preUpdate(SIM_STEP)) player.update(SIM_STEP);   // the dance drives the player itself; otherwise normal control
+    partner.postUpdate(SIM_STEP);
+    simAcc -= SIM_STEP;
+    dt += SIM_STEP;
+  }
+  if (dt > 0) {
+    cine.update(dt, player.position, player.heading);
+    controls.update(dt);
+    skateFx.update(dt);
+    skateFx2.update(dt);
+  }
   world.update(t);
 }
+
+// ---- FPS counter (small, top-right, does not take clicks) -------------------
+const fpsEl = document.createElement('div');
+fpsEl.style.cssText = [
+  'position:fixed', 'top:10px', 'right:12px', 'z-index:12', 'pointer-events:none',
+  'padding:3px 8px', 'border-radius:6px', 'background:rgba(6,12,26,.45)', 'color:rgba(243,217,184,.85)',
+  'font:12px/1.3 ui-monospace, Menlo, Consolas, monospace', 'letter-spacing:.04em',
+].join(';');
+fpsEl.textContent = '-- FPS';
+document.body.appendChild(fpsEl);
+let fpsFrames = 0, fpsTime = 0, fpsWorst = 0;
+function updateFps(realDt) {
+  fpsFrames++; fpsTime += realDt; fpsWorst = Math.max(fpsWorst, realDt);
+  if (fpsTime >= 0.5) {                       // refresh twice a second: average FPS and the slowest frame
+    fpsEl.textContent = `${Math.round(fpsFrames / fpsTime)} FPS · max ${Math.round(fpsWorst * 1000)} ms`;
+    fpsFrames = 0; fpsTime = 0; fpsWorst = 0;
+  }
+}
+
 renderer.setAnimationLoop((now) => {
-  const dt = Math.min((now - last) / 1000, 0.05);
+  const realDt = Math.max(0, (now - last) / 1000);
   last = now;
   const t = (now - start) / 1000;
-  simulate(dt, t);
-  composer.render(dt);
+  updateFps(realDt);
+  simulate(realDt, t);
+  composer.render(Math.min(realDt, MAX_CATCH_UP));
 });
 
     </script>
