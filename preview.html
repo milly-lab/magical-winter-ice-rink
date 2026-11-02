@@ -1987,7 +1987,7 @@ class PlaceholderPlayer {
     const speed = v.length();
     let turn = 0;
     if (speed > 0.15) {
-      let d = Math.atan2(v.x, v.z) - this.heading;
+      let d = Math.atan2(v.x, v.z) + (this.headingOffset || 0) - this.heading;   // headingOffset: π = skating backward (partner Help)
       d = Math.atan2(Math.sin(d), Math.cos(d));
       turn = d * (1 - Math.exp(-dt * 7));
       this.heading += turn;
@@ -2354,6 +2354,7 @@ class PointerControls {
     const r = this.dom.getBoundingClientRect();
     this._ndc.set(((cx - r.left) / r.width) * 2 - 1, -((cy - r.top) / r.height) * 2 + 1);
     this.raycaster.setFromCamera(this._ndc, this.camera);
+    if (this.onTap && this.onTap(this.raycaster)) return;      // partner menu (click on her / close menu / dance)
     if (!this.raycaster.ray.intersectPlane(this.plane, this._hit)) return;
     let { x, z } = this._hit;
     const { islandRadius } = this.bounds;
@@ -2584,6 +2585,596 @@ class SkateFX {
   }
 }
 
+// ===== partner/partnerSkating.js =====
+// Partner skating between the player (male) and Skater2 (female), as its own small state machine that sits
+// on top of the existing skating code (nothing in PlaceholderPlayer's skating / Triple Axel logic is replaced):
+//  - click her → small menu: Help · Hold Hands · Dance
+//  - Help        : he skates backward facing her, holding both her hands; she follows forward (player keeps control)
+//  - Hold Hands  : side by side, his right hand in her left hand (player keeps control)
+//  - Dance       : ~10 s choreographed ice dance along a wide arc; player input paused, then restored
+// Both rigs keep their own skating animation (she reuses the same _animate as the player through a tiny
+// animator object); arms that hold hands are solved with an analytic two-bone IK on the existing
+// shoulder/elbow joints, so joint names, lengths and axes are untouched. Hands meet at one shared
+// clasp point that is kept within both arms' reach, so connected hands never separate.
+
+const PS = {
+  helpGap: 0.92,             // Help: root distance, facing each other (the big heads need the room)
+  holdGap: 0.8,              // Hold Hands: root distance, side by side (she is on his right)
+  dance: { x: 0.95, z: 0.1 },// Dance side hold: she is on his right (0.95 m, room for both arms to reach in) and a touch ahead, both facing the travel direction
+  face: 0.88,                // Dance two-handed hold: facing each other, root to root
+  spinR: 1.0,                // Dance spin: his orbit radius around her
+  minGap: 0.6,               // never closer than this (root to root) outside the choreography
+};
+
+const psClamp01 = (x) => Math.min(1, Math.max(0, x));
+const psSm = (a, b, x) => { const u = psClamp01((x - a) / (b - a)); return u * u * (3 - 2 * u); };
+const psSmoother = (u) => { u = psClamp01(u); return u * u * u * (u * (u * 6 - 15) + 10); };
+const psWrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
+const psLerpA = (a, b, t) => a + psWrap(b - a) * t;
+// local offset (x = left, y = up, z = forward) from a point p with heading h → world
+const psAt = (p, h, x, y, z, out = new THREE.Vector3()) =>
+  out.set(p.x + x * Math.cos(h) + z * Math.sin(h), p.y + y, p.z - x * Math.sin(h) + z * Math.cos(h));
+
+const psJoints = (R) => [R.body, R.pelvis, R.torso, R.neck, R.head, R.armL.shoulder, R.armL.elbow, R.armR.shoulder, R.armR.elbow,
+  R.legL.hip, R.legL.knee, R.legL.ankle, R.legR.hip, R.legR.knee, R.legR.ankle];
+const psSnap = (R) => ({ q: psJoints(R).map((j) => j.quaternion.clone()), p: R.pelvis.position.clone(), s: R.torso.scale.x });
+function psBlendTo(R, snap, w) {                       // move the current pose toward a snapshot by w
+  if (w <= 0) return;
+  psJoints(R).forEach((j, i) => j.quaternion.slerp(snap.q[i], w));
+  R.pelvis.position.lerp(snap.p, w);
+  R.torso.scale.setScalar(lerp(R.torso.scale.x, snap.s, w));
+}
+const psReach = (R) => R.L.upper + R.L.fore + 0.05 - 0.012;   // shoulder → palm centre, a touch short of straight
+const PS_POLE_IN = new THREE.Vector3(0, -1, -0.6);    // inner arm reaching to a partner beside: elbow down and back, never toward her
+const psShoulder = (arm, out = new THREE.Vector3()) => arm.shoulder.getWorldPosition(out);
+const psPalm = (R, arm, out = new THREE.Vector3()) => arm.elbow.localToWorld(out.set(0, -(R.L.fore + 0.05), 0));
+
+// two-bone IK on the existing joints: palm centre → target (world), elbow pointing down / out / back.
+// Blends from the current (animated) arm pose by w.
+const _psM = new THREE.Matrix4(), _psQ = new THREE.Quaternion();
+function psArmIK(R, arm, side, target, w, pole = null) {
+  if (!(w > 0)) return;
+  const a = R.L.upper, b = R.L.fore + 0.05;
+  R.torso.updateWorldMatrix(true, false);
+  const W = R.torso.worldToLocal(target.clone()).sub(arm.shoulder.position);
+  let d = W.length();
+  W.divideScalar(Math.max(d, 1e-6));
+  d = Math.min(Math.max(d, Math.abs(a - b) + 0.03), a + b - 0.002);
+  const ca = (a * a + d * d - b * b) / (2 * a * d), sa = Math.sqrt(Math.max(0, 1 - ca * ca));
+  const n = pole ? pole.clone() : new THREE.Vector3(0.55 * side, -1, -0.35);   // where the elbow points
+  n.addScaledVector(W, -n.dot(W));
+  if (n.lengthSq() < 1e-8) n.set(0, 0, -1);
+  n.normalize();
+  const u = W.clone().multiplyScalar(ca).addScaledVector(n, sa);          // upper arm direction
+  const z = W.clone().addScaledVector(u, -W.dot(u));                       // forearm bends toward the target
+  if (z.lengthSq() < 1e-6) z.copy(n).addScaledVector(u, -n.dot(u)).negate();
+  z.normalize();
+  const Y = u.clone().negate(), X = new THREE.Vector3().crossVectors(Y, z);
+  _psM.makeBasis(X, Y, z);
+  _psQ.setFromRotationMatrix(_psM);
+  arm.shoulder.quaternion.slerp(_psQ, w);
+  const bend = Math.PI - Math.acos(Math.min(1, Math.max(-1, (a * a + b * b - d * d) / (2 * a * b))));
+  arm.elbow.rotation.set(lerp(arm.elbow.rotation.x, -bend, w), 0, 0);
+}
+
+// one shared clasp point P for two hands: each palm sits 8.2 cm to its own side of P, so the two palm balls
+// (r 0.088) just press together — only the hands meet, wrists and forearms stay apart — and P is pulled
+// until both palms are inside their arm's reach
+function psClasp(P, S1, r1, S2, r2) {
+  const e = new THREE.Vector3(S1.x - S2.x, 0, S1.z - S2.z);
+  if (e.lengthSq() < 1e-8) e.set(1, 0, 0);
+  e.normalize();
+  const g = 0.082, H = new THREE.Vector3();
+  for (let k = 0; k < 8; k++) {
+    for (const [S, r, sg] of [[S1, r1, 1], [S2, r2, -1]]) {
+      H.copy(P).addScaledVector(e, g * sg);
+      const dd = H.distanceTo(S);
+      if (dd > r) P.addScaledVector(H.sub(S), -(dd - r) / dd);
+    }
+  }
+  return [P.clone().addScaledVector(e, g), P.clone().addScaledVector(e, -g)];
+}
+
+// backward skating legs: the stroking leg reaches forward instead of back (support leg unchanged), blades flat
+function psLegsBackward(R, w) {
+  if (!(w > 0)) return;
+  const L = R.L;
+  let h = 0;
+  for (const leg of [R.legL, R.legR]) {
+    const hx0 = leg.hip.rotation.x;
+    if (hx0 > 0) leg.hip.rotation.x = lerp(hx0, -0.75 * hx0, w);
+    const hx = leg.hip.rotation.x, kn = leg.knee.rotation.x;
+    leg.ankle.rotation.x = -(hx + kn);
+    h = Math.max(h, (L.thigh * Math.cos(hx) + L.shin * Math.cos(hx + kn)) * Math.cos(leg.hip.rotation.z) + L.foot);
+  }
+  R.pelvis.position.y = h;
+}
+
+class PartnerSkating {
+  constructor({ player, her, bounds, camera, dom, onBusy }) {
+    this.player = player;
+    this.R = her;                                   // her rig
+    this.bounds = bounds;
+    this.camera = camera;
+    this.dom = dom;
+    this.onBusy = onBusy || (() => {});
+    this.mode = null;                               // null | 'help' | 'hold' | 'dance'
+    this.idleSnap = psSnap(her);                    // her original standing pose
+    this.H = {
+      vel: new THREE.Vector3(), heading: her.root.rotation.y, active: false, locked: false,
+      wJoin: 0, wRel: 0, lastMode: null, idleT: -1, yaw: 0,
+      anim: { rig: her, keys: new Set(), target: null, glide: 0, phase: 0, time: 0, roll: 0 },
+    };
+    this.wHelp = 0;
+    this.skirt = her.pelvis.children.find((o) => o.isMesh && o.geometry.type === 'LatheGeometry') || null;
+    this._push = new Set(['partner']);
+    this._none = new Set();
+
+    // invisible pick volume around her (easy to click, never rendered)
+    this.pick = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.45, 1.95, 12), new THREE.MeshBasicMaterial());
+    this.pick.position.y = 0.97;
+    this.pick.visible = false;
+    her.root.add(this.pick);
+
+    this._buildUI();
+    addEventListener('keydown', (e) => { if (e.code === 'Escape') { this.closeMenu(); if (this.mode === 'help' || this.mode === 'hold') this.cancel(); } });
+  }
+
+  // ---------------- UI ----------------
+  _buildUI() {
+    const pill = [
+      'padding:8px 16px', 'border-radius:999px', 'border:1px solid rgba(243,217,184,.45)',
+      'background:rgba(6,12,26,.62)', 'color:#f3d9b8', 'cursor:pointer', 'white-space:nowrap',
+      'font:300 13px/1 "Helvetica Neue", Arial, sans-serif', 'letter-spacing:.08em',
+      'backdrop-filter:blur(4px)', '-webkit-backdrop-filter:blur(4px)',
+    ].join(';');
+    const menu = document.createElement('div');
+    menu.style.cssText = 'position:fixed;left:0;top:0;z-index:11;display:none;gap:8px;transform:translate(-50%,-100%);pointer-events:auto';
+    for (const [label, mode] of [['Help', 'help'], ['Hold Hands', 'hold'], ['Dance', 'dance']]) {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.style.cssText = pill;
+      b.addEventListener('pointerdown', (e) => e.stopPropagation());
+      b.addEventListener('click', (e) => { e.stopPropagation(); this.closeMenu(); this.start(mode); b.blur(); });
+      menu.appendChild(b);
+    }
+    document.body.appendChild(menu);
+    this.menu = menu;
+
+    const letGo = document.createElement('button');
+    letGo.textContent = 'Let Go';
+    letGo.style.cssText = pill + ';position:fixed;left:50%;bottom:66px;transform:translateX(-50%);z-index:10;display:none';
+    letGo.addEventListener('click', () => { this.cancel(); letGo.blur(); });
+    document.body.appendChild(letGo);
+    this.letGo = letGo;
+  }
+
+  openMenu() { this.menu.style.display = 'flex'; this.menuOpen = true; this._placeMenu(); }
+  closeMenu() { this.menu.style.display = 'none'; this.menuOpen = false; }
+
+  _placeMenu() {
+    if (!this.menuOpen) return;
+    const p = this.R.root.localToWorld(new THREE.Vector3(0, 2.05, 0)).project(this.camera);
+    if (p.z > 1) { this.closeMenu(); return; }
+    const r = this.dom.getBoundingClientRect();
+    this.menu.style.left = `${r.left + (p.x * 0.5 + 0.5) * r.width}px`;
+    this.menu.style.top = `${r.top + (-p.y * 0.5 + 0.5) * r.height}px`;
+  }
+
+  // canvas tap (from PointerControls): true = consumed (no click-to-move)
+  handleTap(raycaster) {
+    if (this.menuOpen) { this.closeMenu(); return true; }
+    if (this.mode === 'dance') return true;                      // input paused during the performance
+    if (this.player.trick) return false;
+    if (raycaster.intersectObject(this.pick, false).length) { this.openMenu(); return true; }
+    return false;
+  }
+
+  // ---------------- state ----------------
+  get busy() { return this.mode === 'dance'; }
+
+  start(mode) {
+    if (this.player.trick || this.mode === mode || this.mode === 'dance') return;
+    this.mode = mode;
+    const H = this.H;
+    H.active = true; H.locked = false; H.idleT = -1; H.lastMode = mode;
+    this.player.headingOffset = mode === 'help' ? Math.PI : 0;
+    this.letGo.style.display = mode === 'dance' ? 'none' : 'block';
+    if (mode === 'dance') {
+      this.player.target = null;
+      this.D = { stage: 'join', t: 0, settle: 0 };
+      this.onBusy(true);
+    }
+  }
+
+  cancel() {                                                     // Help / Hold Hands → let go
+    if (this.mode !== 'help' && this.mode !== 'hold') return;
+    this.mode = null;
+    this.H.locked = false;
+    this.player.headingOffset = 0;
+    this.letGo.style.display = 'none';
+  }
+
+  // called before player.update(); returns true when the dance drives the player this frame
+  preUpdate(dt) {
+    if (this.mode !== 'dance') return false;
+    this._dance(dt);
+    this._placeMenu();
+    return true;
+  }
+
+  // called after player.update()
+  postUpdate(dt) {
+    if (this.mode !== 'dance') this._follow(dt);
+    this._placeMenu();
+  }
+
+  // ---------------- helpers ----------------
+  _clampIce(p) {
+    const b = this.bounds, out = b.dist(p.x, p.z) + 0.8;
+    if (out > 0) { const n = b.normal(p.x, p.z); p.x -= n.x * out; p.z -= n.z * out; }
+    const r = Math.hypot(p.x, p.z), m = b.islandRadius + 0.8;
+    if (r < m) { const k = m / Math.max(r, 1e-3); p.x *= k; p.z *= k; }
+  }
+
+  _animateHer(dt, speed, pushing) {
+    const A = this.H.anim;
+    A.keys = pushing ? this._push : this._none;
+    PlaceholderPlayer.prototype._animate.call(A, dt, speed, this.H.yaw);
+  }
+
+  // skate her toward a slot next to him; once there she stays locked to it (with a little give)
+  _chase(dt, want, wantH, minGap = PS.minGap) {
+    const H = this.H, p = this.R.root.position, v = H.vel, P = this.player;
+    const ox = p.x, oz = p.z;
+    let dx = want.x - p.x, dz = want.z - p.z, dist = Math.hypot(dx, dz);
+    if (!H.locked) {
+      const sp = Math.min(9, Math.sqrt(2 * 6 * dist));
+      const tvx = P.velocity.x + (dist > 1e-4 ? (dx / dist) * sp : 0), tvz = P.velocity.z + (dist > 1e-4 ? (dz / dist) * sp : 0);
+      const k = 1 - Math.exp(-dt * 4);
+      v.x += (tvx - v.x) * k; v.z += (tvz - v.z) * k;
+      p.x += v.x * dt; p.z += v.z * dt;
+      if (Math.hypot(want.x - p.x, want.z - p.z) < 0.12) H.locked = true;
+    } else {
+      const k = 1 - Math.exp(-dt * 14);
+      p.x += dx * k; p.z += dz * k;
+      dx = p.x - want.x; dz = p.z - want.z; dist = Math.hypot(dx, dz);
+      if (dist > 0.08) { p.x = want.x + (dx / dist) * 0.08; p.z = want.z + (dz / dist) * 0.08; }
+    }
+    this._keepApart(p, minGap);
+    this._clampIce(p);
+    if (dt > 0) v.set((p.x - ox) / dt, 0, (p.z - oz) / dt);
+    const d2 = Math.hypot(want.x - p.x, want.z - p.z);
+    H.wJoin = Math.min(1, Math.max(0, H.wJoin + (d2 < 0.5 ? dt : -dt) * 2.5));
+    // heading: face the way she travels while skating over, then the formation heading
+    const spd = Math.hypot(v.x, v.z);
+    const travelH = spd > 0.5 ? Math.atan2(v.x - P.velocity.x * H.wJoin, v.z - P.velocity.z * H.wJoin) : H.heading;
+    const tgt = H.locked || spd < 0.5 ? wantH : psLerpA(travelH, wantH, psSm(0, 1, H.wJoin));
+    this._turnHer(dt, tgt, 8);
+    return spd;
+  }
+
+  _turnHer(dt, h, rate) {
+    const H = this.H, prev = H.heading;
+    H.heading = psLerpA(H.heading, h, 1 - Math.exp(-dt * rate));
+    H.yaw = dt > 0 ? psWrap(H.heading - prev) / dt : 0;
+    this.R.root.rotation.y = H.heading;
+  }
+
+  _keepApart(p, g = PS.minGap) {
+    const m = this.player.mesh.position, dx = p.x - m.x, dz = p.z - m.z, d = Math.hypot(dx, dz);
+    if (d < g) {
+      const k = d > 1e-4 ? g / d : 0;
+      if (k) { p.x = m.x + dx * k; p.z = m.z + dz * k; } else { p.x = m.x + g; }
+    }
+  }
+
+  // Help / Hold Hands (player-controlled), and her letting go / coming to rest afterwards
+  _follow(dt) {
+    const H = this.H, P = this.player, R = this.R, M = P.rig;
+    this.wHelp += ((this.mode === 'help' ? 1 : 0) - this.wHelp) * (1 - Math.exp(-dt * 5));
+    // his backward skating (Help): stroke forward, lean into turns the right way
+    psLegsBackward(M, this.wHelp);
+    M.body.rotation.z *= 1 - 2 * this.wHelp;
+    if (!H.active) return;
+
+    const mp = P.mesh.position, mh = P.heading, mPush = P.keys.size > 0 || P.target !== null;
+    let spd;
+    if (this.mode === 'help' || this.mode === 'hold') {
+      const help = this.mode === 'help';
+      const want = help ? psAt(mp, mh, 0, 0, PS.helpGap) : psAt(mp, mh, -PS.holdGap, 0, 0);
+      spd = this._chase(dt, want, help ? mh + Math.PI : mh);
+      H.wRel = Math.min(1, H.wRel + dt * 3);
+      if (H.locked) H.anim.phase = P.phase + (help ? Math.PI : 0);      // strokes in time with his
+      this._animateHer(dt, spd, H.locked && mPush);
+    } else {
+      // let go: glide out, then settle back into her standing pose
+      const p = R.root.position, v = H.vel, ox = p.x, oz = p.z;
+      v.multiplyScalar(Math.exp(-1.6 * dt));
+      p.addScaledVector(v, dt);
+      this._keepApart(p);
+      this._clampIce(p);
+      if (dt > 0) v.set((p.x - ox) / dt, 0, (p.z - oz) / dt);
+      spd = v.length();
+      if (spd > 0.4) this._turnHer(dt, Math.atan2(v.x, v.z), 4); else H.yaw = 0;
+      H.wRel = Math.max(0, H.wRel - dt * 2.5);
+      H.wJoin = Math.max(0, H.wJoin - dt * 2.5);
+      this._animateHer(dt, spd, false);
+      if (H.wRel === 0 && spd < 0.12) {
+        if (H.idleT < 0) H.idleT = 0;
+        H.idleT += dt;
+        psBlendTo(R, this.idleSnap, psSm(0, 0.8, H.idleT));
+        if (H.idleT >= 0.8) { H.active = false; v.set(0, 0, 0); }
+      }
+    }
+    this._hands(H.lastMode, psSm(0, 1, H.wJoin) * psSm(0, 1, H.wRel));
+  }
+
+  _hands(mode, w) {
+    if (!(w > 0.001)) return;
+    const P = this.player, M = P.rig, R = this.R;
+    P.mesh.updateMatrixWorld(true);
+    R.root.updateMatrixWorld(true);
+    const rM = psReach(M), rF = psReach(R);
+    const mp = P.mesh.position, mh = P.mesh.rotation.y;
+    if (mode === 'help') {
+      // both hands: his left ↔ her right, his right ↔ her left, held low between them
+      for (const [ma, ms, fa, fs, x] of [[M.armL, 1, R.armR, -1, 0.21], [M.armR, -1, R.armL, 1, -0.21]]) {
+        const Sm = psShoulder(ma), Sf = psShoulder(fa);
+        const y = (Sm.y + Sf.y) / 2 - mp.y - 0.3;
+        const Pt = psAt(mp, mh, x, y, PS.helpGap / 2 + 0.02);
+        const [hm, hf] = psClasp(Pt, Sm, rM, Sf, rF);
+        psArmIK(M, ma, ms, hm, w);
+        psArmIK(R, fa, fs, hf, w);
+      }
+    } else if (mode === 'hold') {
+      // his right hand ↔ her left hand, between them at hip height, a little in front
+      const Sm = psShoulder(M.armR), Sf = psShoulder(R.armL);
+      const y = (Sm.y + Sf.y) / 2 - mp.y - 0.34;
+      const Pt = psAt(mp, mh, -PS.holdGap / 2, y, 0.1);
+      const [hm, hf] = psClasp(Pt, Sm, rM, Sf, rF);
+      psArmIK(M, M.armR, -1, hm, w, PS_POLE_IN);
+      psArmIK(R, R.armL, 1, hf, w, PS_POLE_IN);
+    } else if (mode === 'dance') {
+      this._danceHands(w, 0);
+    }
+  }
+
+  // ---------------- Dance ----------------
+  // speed of the couple along the path (m/s): open & build → glide → slow pivot for the spin → glide → stop
+  _danceSpeed(t) {
+    const a = psSm(0.3, 1.9, t), b = psSm(3.9, 4.6, t), c = psSm(7.0, 7.8, t), d = psSm(8.4, 9.4, t);
+    return 3.4 * a * (1 - b) + 0.5 * b * (1 - c) + 3.2 * c * (1 - d);
+  }
+
+  _fitPath(start, h0) {
+    // a wide arc for the whole performance: try radii / turn directions / start directions near his heading
+    let len = 0;
+    for (let t = 0; t < 9.4; t += 0.01) len += this._danceSpeed(t) * 0.01;
+    const b = this.bounds, margin = 1.9;
+    let best = null, bestM = -Infinity;
+    for (const Rc of [6.5, 5, 4]) for (let i = 0; i < 13; i++) for (const sg of [1, -1]) {
+      const dh = (i % 2 ? 1 : -1) * Math.ceil(i / 2) * (Math.PI / 6);
+      const path = { a: start.clone(), h0: h0 + dh, k: sg / Rc, len };
+      let m = Infinity;
+      for (let s = 0; s <= len; s += 0.5) {
+        const q = this._arc(path, s);
+        m = Math.min(m, -b.dist(q.x, q.z), Math.hypot(q.x, q.z) - b.islandRadius);
+      }
+      if (m > margin) return path;
+      if (m > bestM) { bestM = m; best = path; }
+    }
+    return best;
+  }
+
+  _arc(path, s, out = new THREE.Vector3()) {
+    const { a, h0, k } = path, h = h0 + k * s;
+    return out.set(a.x + (Math.cos(h0) - Math.cos(h)) / k, a.y, a.z + (Math.sin(h) - Math.sin(h0)) / k);
+  }
+
+  _dance(dt) {
+    const P = this.player, M = P.rig, R = this.R, H = this.H, D = this.D;
+    const animateHim = (speed, yaw, pushing) => {
+      const keys = P.keys;
+      P.keys = pushing ? this._push : this._none;
+      P._animate(dt, speed, yaw);
+      P.keys = keys;
+    };
+
+    if (D.stage === 'join') {
+      // he eases to a stop; she skates over into the dance hold in front of him
+      const mp = P.mesh.position, v = P.velocity;
+      v.multiplyScalar(Math.exp(-4 * dt));
+      mp.addScaledVector(v, dt);
+      this._clampIce(mp);
+      P.mesh.rotation.y = P.heading;
+      animateHim(v.length(), 0, false);
+      const want = psAt(mp, P.heading, 0, 0, PS.face);
+      const spd = this._chase(dt, want, P.heading + Math.PI);
+      H.wRel = Math.min(1, H.wRel + dt * 3);
+      this._animateHer(dt, spd, false);
+      D.w = psSm(0, 1, H.wJoin) * psSm(0, 1, H.wRel);
+      D.t = 0;
+      this._dancePose(0, D.w, 0);
+      if (H.locked && H.wJoin >= 1 && v.length() < 0.6) D.settle += dt;
+      if (D.settle > 0.25) {
+        D.stage = 'perform';
+        D.path = this._fitPath(R.root.position.clone(), P.heading);
+        D.s = 0; D.t = 0;
+        D.m0 = P.mesh.position.clone(); D.f0 = R.root.position.clone();
+        D.hm0 = P.heading; D.hf0 = H.heading;
+        D.prevM = P.mesh.position.clone(); D.prevHM = P.heading;
+      }
+      return;
+    }
+
+    // ---- perform (≈10 s) ----
+    D.t += dt;
+    const t = D.t, v = this._danceSpeed(t);
+    D.s = Math.min(D.path.len, D.s + v * dt);
+    const psi = D.path.h0 + D.path.k * D.s;                       // path direction (his forward in the hold)
+    const anchor = this._arc(D.path, D.s);                       // her position
+    const C = this._danceCurves(t), wS = C.wS, wLeg = C.wLeg, b = C.b;
+    // her place around him: b 0 = facing him (two-handed hold, she skates backward), b 1 = on his right (one-handed);
+    // she swings around him keeping his right hand in her left, turning from facing him to facing his way
+    const bS = Math.atan2(PS.dance.x, PS.dance.z), beta = bS * b;
+    const d0 = lerp(PS.face, Math.hypot(PS.dance.x, PS.dance.z), b);
+    const relH = psAt(new THREE.Vector3(), psi, d0 * Math.sin(beta), 0, -d0 * Math.cos(beta));   // him relative to her
+    const phi = Math.atan2(relH.z, relH.x) + 4 * Math.PI * psSmoother((t - 4.6) / 2.5);   // he circles her twice (only while fully in the spin hold)
+    const rr = d0 + (PS.spinR - d0) * wS;
+    const mPos = new THREE.Vector3(anchor.x + rr * Math.cos(phi), anchor.y, anchor.z + rr * Math.sin(phi));
+    const hm = Math.atan2(Math.cos(phi), Math.sin(phi));          // heading of the direction her → him
+    let fH = psLerpA(psi + Math.PI * (1 - b), hm - Math.PI / 2, wS);   // her: facing him → left side to him (spins with him)
+    let mH = psLerpA(psi, hm - Math.PI / 2, wS);                   // him: right side to her, skating forward around her
+    // first 0.8 s: ease both roots from where they stood into the choreography
+    const e = psSm(0, 0.8, t);
+    anchor.lerpVectors(D.f0, anchor, e); mPos.lerpVectors(D.m0, mPos, e);
+    fH = psLerpA(D.hf0, fH, e); mH = psLerpA(D.hm0, mH, e);
+
+    // him
+    const mSpeed = dt > 0 ? mPos.distanceTo(D.prevM) / dt : 0, mYaw = dt > 0 ? psWrap(mH - D.prevHM) / dt : 0;
+    if (dt > 0) P.velocity.subVectors(mPos, D.prevM).divideScalar(dt);
+    D.prevM.copy(mPos); D.prevHM = mH;
+    P.mesh.position.copy(mPos);
+    P.mesh.rotation.y = mH;
+    P.heading = psLerpA(P.heading, psi, 1 - Math.exp(-dt * 3));   // camera keeps following the travel direction
+    const stroke = (t > 0.3 && t < 3.8) || (t > 7.1 && t < 8.6);
+    animateHim(mSpeed, mYaw, stroke);
+    M.body.rotation.z *= 1 - 0.75 * wS;                           // only a slight lean into the circle (heads stay apart)
+    // circling her fast leans him into the curve: keep both blades on (not in) the ice
+    P.mesh.position.y = this.bounds.iceY;
+    P.mesh.updateMatrixWorld(true);
+    const low = Math.min(...[M.legL, M.legR].map((lg) => lg.ankle.localToWorld(new THREE.Vector3(0, -M.L.foot, 0.03)).y));
+    P.mesh.position.y += Math.max(0, this.bounds.iceY - 0.02 - low);
+
+    // her
+    R.root.position.copy(anchor);
+    const prevF = H.heading;
+    H.heading = fH; R.root.rotation.y = fH;
+    H.yaw = dt > 0 ? psWrap(fH - prevF) / dt : 0;
+    H.vel.set(0, 0, 0);
+    H.anim.phase = P.phase;                                      // strokes in time
+    this._animateHer(dt, v, stroke);
+    psLegsBackward(R, 1 - b);                                     // facing him she skates backward
+
+    // envelope: arms let go and she settles at the end
+    const wEnd = 1 - psSm(9.4, 10.0, t);
+    D.w = wEnd;
+    this._dancePose(wS, wEnd, wLeg);
+    if (t > 9.5) psBlendTo(R, this.idleSnap, psSm(9.5, 10.2, t));
+
+    if (t >= 10.2) {
+      // back to normal: player control restored, she stands in her idle pose
+      this.mode = null;
+      P.mesh.position.y = this.bounds.iceY;
+      H.active = false; H.locked = false; H.wJoin = 0; H.wRel = 0; H.lastMode = null;
+      P.heading = mH; P.mesh.rotation.y = mH;
+      P.velocity.set(0, 0, 0);
+      this.onBusy(false);
+    }
+  }
+
+  // timing of the performance (s):
+  //  0–0.9  two-handed hold, facing, hands opened out · 0.9–1.3 let go of one hand · 1.0–1.7 she swings to his side
+  //  1.7–2.4 one-handed glide · 2.4–3.0 back to facing, 2.8–3.1 both hands again · 3.1–3.5 two-handed pose
+  //  3.5–3.8 one hand released · 3.6–4.2 to his side · 4.2–7.5 her spin (he circles her twice 4.6–7.1)
+  //  7.5–9.4 final glide into the closing pose (joined hands raised forward, outer arms open) · 9.4–10.2 let go
+  _danceCurves(t) {
+    return {
+      b: psSm(1.0, 1.7, t) - psSm(2.4, 3.0, t) + psSm(3.6, 4.2, t),
+      w2: 1 - psSm(0.9, 1.3, t) + psSm(2.8, 3.1, t) - psSm(3.5, 3.8, t),
+      wS: psSm(4.2, 4.6, t) * (1 - psSm(7.1, 7.5, t)),
+      wLeg: psSm(4.8, 5.3, t) * (1 - psSm(6.4, 6.9, t)),
+      close: psSm(7.9, 8.6, t),
+      open: Math.max(psSm(1.2, 1.8, t) * (1 - psSm(2.3, 2.8, t)), psSm(8.2, 9.0, t)),
+    };
+  }
+
+  // body + arm overrides for the dance (after both skating animations ran)
+  _dancePose(wS, w, wLeg) {
+    const R = this.R, M = this.player.rig, D = this.D, t = D.t;
+    const mix = (o, k, v, ww) => { o[k] = lerp(o[k], v, ww); };
+    // upright, elegant carriage (and room between the two chests)
+    mix(M.torso.rotation, 'x', 0.16, 0.75 * w); mix(M.torso.rotation, 'y', 0, 0.6 * w);
+    mix(R.torso.rotation, 'x', 0.1, 0.75 * w); mix(R.torso.rotation, 'y', 0, 0.6 * w);
+    // outer (free) arms — his left, her right: a long open line at the opening and the finish, softer in the glides,
+    // during the spin his opens out to the side and hers reaches up and forward
+    const open = this._danceCurves(t).open;
+    const flow = 0.12 * Math.sin(t * 2.2);
+    const ox = lerp(-0.15 + flow, -0.4, open), oz = lerp(1.05, 1.45, open), oe = lerp(-0.35, -0.12, open);
+    for (const [arm, sd, isHer] of [[M.armL, 1, false], [R.armR, -1, true]]) {
+      const sx = isHer ? -2.2 : -0.25, szz = isHer ? 0.35 : 1.3, se = isHer ? -0.2 : -0.25;
+      mix(arm.shoulder.rotation, 'x', lerp(ox, sx, wS), w); mix(arm.shoulder.rotation, 'y', 0, w);
+      mix(arm.shoulder.rotation, 'z', lerp(oz, szz, wS) * sd, w); mix(arm.elbow.rotation, 'x', lerp(oe, se, wS), w);
+    }
+
+    // her spin: legs together on the right blade, then a camel-style spin — body forward, left leg raised high behind
+    if (wS > 0) {
+      const sup = R.legR, fr = R.legL, L = R.L;
+      const pp = 1.0 * wLeg;                                      // pelvis pitches forward with the lift
+      for (const [leg, side] of [[sup, -1], [fr, 1]]) {
+        mix(leg.hip.rotation, 'x', -0.03, wS); mix(leg.hip.rotation, 'y', 0, wS); mix(leg.hip.rotation, 'z', 0.03 * side, wS);
+        mix(leg.knee.rotation, 'x', 0.05, wS);
+      }
+      sup.hip.rotation.x -= pp;                                   // support leg stays vertical under the tilted pelvis
+      mix(fr.hip.rotation, 'x', 1.3, wLeg); mix(fr.hip.rotation, 'z', 0.12, wLeg); mix(fr.knee.rotation, 'x', 0.0, wLeg);
+      R.pelvis.rotation.x = pp;
+      R.body.rotation.z = lerp(R.body.rotation.z, 0, wS);         // spin upright on the blade (no turn lean)
+      sup.ankle.rotation.set(-(pp + sup.hip.rotation.x + sup.knee.rotation.x), 0, -sup.hip.rotation.z * 0.6);
+      fr.ankle.rotation.set(lerp(-(pp + fr.hip.rotation.x + fr.knee.rotation.x), 0.55, wLeg), 0, 0);
+      const ext = (L.thigh * Math.cos(pp + sup.hip.rotation.x) + L.shin * Math.cos(pp + sup.hip.rotation.x + sup.knee.rotation.x)) * Math.cos(sup.hip.rotation.z) + L.foot;
+      R.pelvis.position.y = lerp(R.pelvis.position.y, ext - 0.02 * (1 - Math.cos(pp)), wS);
+      R.pelvis.position.x = lerp(R.pelvis.position.x, -0.04, wS);
+      mix(R.torso.rotation, 'x', 0.1 + 0.25 * wLeg, wS); mix(R.torso.rotation, 'z', 0, wS);
+      mix(R.neck.rotation, 'x', -0.75 * wLeg, wS);                // head lifts to look along the spin
+      if (this.skirt) this.skirt.rotation.x = 0.55 * wLeg;          // skirt flares with the lifted leg
+    } else {
+      R.pelvis.rotation.x = 0;
+      if (this.skirt) this.skirt.rotation.x = 0;
+    }
+    if (!(w > 0.001)) return;
+    this._danceHands(w, wS);
+  }
+
+  _danceHands(w, wS = 0) {
+    // only the hands meet: palms press together at a shared point, each arm bends on its own side.
+    // hands A (his right ↔ her left) are held throughout; hands B (his left ↔ her right) join for the two-handed holds
+    const P = this.player, M = P.rig, R = this.R, C = this._danceCurves(this.D.t), b = C.b;
+    P.mesh.updateMatrixWorld(true);
+    R.root.updateMatrixWorld(true);
+    const mp = P.mesh.position, mh = P.mesh.rotation.y, rM = psReach(M), rF = psReach(R);
+    const d = lerp(PS.face, Math.hypot(PS.dance.x, PS.dance.z), b);
+    const fwd = new THREE.Vector3(Math.sin(mh), 0, Math.cos(mh));
+    const pole = (side) => new THREE.Vector3(0.55 * side * (1 - b), -1, -0.3 - 0.3 * b);   // facing: out to the side · beside her: down and back
+    const mid = (S1, S2, dy, ahead) => new THREE.Vector3().addVectors(S1, S2).multiplyScalar(0.5).add(new THREE.Vector3(0, dy, 0)).addScaledVector(fwd, ahead);
+    // A
+    {
+      const Sm = psShoulder(M.armR), Sf = psShoulder(R.armL);
+      const facing = psAt(mp, mh, -0.36, Sm.y - mp.y - 0.1, d / 2);                // opened out to his right
+      // beside her: held low between them (glide), raised forward for the spin and the closing pose — the arms reach
+      // toward each other from their own elbows, so the forearms converge only at the palms
+      const Pt = facing.lerp(mid(Sm, Sf, -0.2, 0.2), b).lerp(mid(Sm, Sf, 0.14, 0.3), Math.max(wS, C.close));
+      const [cm, cf] = psClasp(Pt, Sm, rM, Sf, rF);
+      // beside each other the elbows point down and back in the world (not in her tilted torso frame — during the
+      // camel spin that would aim her elbow up at him) and a little away from the partner
+      const toLocal = (rig, v) => v.applyQuaternion(rig.torso.getWorldQuaternion(new THREE.Quaternion()).invert());
+      const side = (rig, h, sx) => toLocal(rig, new THREE.Vector3(0, -1, 0)
+        .addScaledVector(new THREE.Vector3(Math.sin(h), 0, Math.cos(h)), -0.6).addScaledVector(new THREE.Vector3(Math.cos(h), 0, -Math.sin(h)), 0.25 * sx));
+      psArmIK(M, M.armR, -1, cm, w, pole(-1).lerp(side(M, mh, 1), b));
+      psArmIK(R, R.armL, 1, cf, w, pole(1).lerp(side(R, R.root.rotation.y, -1), b));
+    }
+    // B
+    const w2 = w * C.w2;
+    if (w2 > 0.001) {
+      const Sm = psShoulder(M.armL), Sf = psShoulder(R.armR);
+      const Pt = psAt(mp, mh, 0.36, Sm.y - mp.y - 0.1, d / 2).lerp(mid(Sm, Sf, -0.15, 0.1), b);   // opened out to his left
+      const [cm, cf] = psClasp(Pt, Sm, rM, Sf, rF);
+      psArmIK(M, M.armL, 1, cm, w2, pole(1));
+      psArmIK(R, R.armR, -1, cf, w2, pole(-1));
+    }
+  }
+}
+
 // ===== main.js =====
 
 
@@ -2640,6 +3231,16 @@ const cine = new FollowCamera(camera);
 const controls = new PointerControls(renderer.domElement, camera, cine, player, world.bounds, scene);
 const skateFx = new SkateFX(scene, player, world.bounds);
 skateFx.setViewportHeight(renderer.getDrawingBufferSize(new THREE.Vector2()).y);
+// her own ice dust + blade marks (same effect, only active when she actually skates)
+const skateFx2 = new SkateFX(scene, { rig: skater2, mesh: skater2.root }, world.bounds);
+skateFx2.setViewportHeight(renderer.getDrawingBufferSize(new THREE.Vector2()).y);
+
+// ---- partner skating (click her: Help · Hold Hands · Dance) -----------------
+const partner = new PartnerSkating({
+  player, her: skater2, bounds: world.bounds, camera, dom: renderer.domElement,
+  onBusy: (b) => { axelBtn.disabled = b; axelBtn.style.opacity = b ? '0.4' : '1'; },
+});
+controls.onTap = (ray) => partner.handleTap(ray);
 
 // ---- temporary Triple Axel button --------------------------------------------
 const axelBtn = document.createElement('button');
@@ -2653,6 +3254,7 @@ axelBtn.style.cssText = [
 ].join(';');
 axelBtn.addEventListener('click', () => {
   if (axelBtn.disabled) return;
+  partner.cancel();                     // Help / Hold Hands: let go first, then jump
   const started = player.startTripleAxel(() => { axelBtn.disabled = false; axelBtn.style.opacity = '1'; });
   if (started) { axelBtn.disabled = true; axelBtn.style.opacity = '0.4'; }
   axelBtn.blur();
@@ -2678,21 +3280,27 @@ function onResize() {
   const b = renderer.getDrawingBufferSize(new THREE.Vector2());
   world.setSize(b.x, b.y, renderer.getPixelRatio());
   if (typeof skateFx !== 'undefined') skateFx.setViewportHeight(b.y);
+  if (typeof skateFx2 !== 'undefined') skateFx2.setViewportHeight(b.y);
 }
 window.addEventListener('resize', onResize);
 
 // ---- loop ------------------------------------------------------------------
 let last = performance.now();
 const start = last;
+function simulate(dt, t) {
+  if (!partner.preUpdate(dt)) player.update(dt);   // the dance drives the player itself; otherwise normal control
+  partner.postUpdate(dt);
+  cine.update(dt, player.position, player.heading);
+  controls.update(dt);
+  skateFx.update(dt);
+  skateFx2.update(dt);
+  world.update(t);
+}
 renderer.setAnimationLoop((now) => {
   const dt = Math.min((now - last) / 1000, 0.05);
   last = now;
   const t = (now - start) / 1000;
-  player.update(dt);
-  cine.update(dt, player.position, player.heading);
-  controls.update(dt);
-  skateFx.update(dt);
-  world.update(t);
+  simulate(dt, t);
   composer.render(dt);
 });
 
