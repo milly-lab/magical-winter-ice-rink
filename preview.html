@@ -1020,6 +1020,92 @@ function createChristmasTree({ glow, bulbs, renderer }) {
     model.add(gltf.scene);
   }, (err) => console.error('[ChristmasTree] GLB failed to load', err));
 
+  // ---- snowflake topper (2026-11-02; silvery white with a hint of blue, shown at 50% → ~1.55 m) ----
+  // Built in the XY plane (facing +z), ~3.1 m across before scaling: six tapered main arms, three pairs of side
+  // branches per arm, jewel beads at the tips, an inner hexagonal ring, a beaded outer ring and a
+  // faceted centre jewel — all one polished gold. Its lowest arm rests on the tree's highest point,
+  // tied on by a short gold stem; it turns to face the camera (yaw only) and twinkles softly.
+  // centre of the tree's crown at its peak (crown centre line x −0.60, z −0.29 over the top 3 m; peak on that line 19.28 m)
+  const TOP = new THREE.Vector3(-0.6, 19.28, -0.29);
+  const topper = new THREE.Group();
+  topper.name = 'SnowflakeTopper';
+  const TOPPER_SCALE = 0.5;
+  const gold = new THREE.MeshPhysicalMaterial({                 // (name kept) silvery white with a hint of blue
+    color: 0xd4e2ff, metalness: 1, roughness: 0.16, clearcoat: 0.8, clearcoatRoughness: 0.08,
+    envMap: env, envMapIntensity: 1.25, emissive: 0x24365a, emissiveIntensity: 1,
+  });
+  {
+    const R = 1.45, arms = 6, parts = [];
+    const blade = (len, w0, w1, depth) => {                  // tapered, bevelled blade along +y from the origin
+      const sh = new THREE.Shape();
+      sh.moveTo(-w0 / 2, 0); sh.lineTo(-w1 / 2, len * 0.86); sh.lineTo(0, len); sh.lineTo(w1 / 2, len * 0.86); sh.lineTo(w0 / 2, 0);
+      sh.quadraticCurveTo(0, -w0 * 0.35, -w0 / 2, 0);
+      const g = new THREE.ExtrudeGeometry(sh, { depth, bevelEnabled: true, bevelThickness: depth * 0.45, bevelSize: Math.min(w1, w0) * 0.3, bevelSegments: 4, curveSegments: 8 });
+      g.translate(0, 0, -depth / 2);
+      return g;
+    };
+    const place = (g, angle, x = 0, y = 0) => { g.rotateZ(angle); g.translate(x, y, 0); parts.push(g); };
+    for (let k = 0; k < arms; k++) {
+      const a = (k / arms) * Math.PI * 2;                     // k = 0 points straight up
+      const dx = -Math.sin(a), dy = Math.cos(a);
+      place(blade(R, 0.17, 0.08, 0.07), a);
+      // side branches: three pairs, longer near the centre, swept outward at 52°
+      for (const [d, len] of [[0.45, 0.5], [0.8, 0.4], [1.1, 0.26]]) {
+        for (const sgn of [-1, 1]) place(blade(len, 0.09, 0.045, 0.05), a + sgn * 0.9, dx * d, dy * d);
+      }
+      // little diamond near the tip + a jewel bead on the tip
+      const dia = new THREE.OctahedronGeometry(0.11, 0); dia.scale(0.75, 1.25, 0.5);
+      place(dia, a, dx * (R - 0.32), dy * (R - 0.32));
+      const bead = new THREE.SphereGeometry(0.085, 20, 14);
+      place(bead, 0, dx * (R + 0.04), dy * (R + 0.04));
+      // beads on an outer ring, between the arms
+      const b2 = new THREE.SphereGeometry(0.055, 16, 12), a2 = a + Math.PI / arms;
+      place(b2, 0, -Math.sin(a2) * 0.62, Math.cos(a2) * 0.62);
+    }
+    // inner hexagonal ring
+    const hex = [];
+    for (let k = 0; k <= arms; k++) { const a = (k / arms) * Math.PI * 2 + Math.PI / arms; hex.push(new THREE.Vector3(-Math.sin(a) * 0.4, Math.cos(a) * 0.4, 0)); }
+    parts.push(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(hex, true, 'catmullrom', 0.05), 96, 0.035, 10, true));
+    // faceted centre jewel on a round boss
+    const boss = new THREE.CylinderGeometry(0.24, 0.26, 0.1, 6); boss.rotateX(Math.PI / 2); parts.push(boss);
+    const gem = new THREE.OctahedronGeometry(0.2, 1); gem.scale(1, 1, 0.75); parts.push(gem);
+    for (const g of parts) topper.add(new THREE.Mesh(g, gold));
+    // short gold stem tying the lowest arm onto the tree tip
+    const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.08, 0.6, 16), gold);
+    stem.position.y = -R * 0.86 - 0.12;
+    topper.add(stem);
+    topper.scale.setScalar(TOPPER_SCALE);
+    topper.position.set(TOP.x, TOP.y + R * 0.86 * TOPPER_SCALE, TOP.z);   // lowest arm tip sits on the tree tip
+    // twinkling glints across the flake (they turn with it)
+    const gp = [], gs = [];
+    for (let k = 0; k < arms; k++) {
+      const a = (k / arms) * Math.PI * 2, dx = -Math.sin(a), dy = Math.cos(a);
+      for (const d of [R + 0.04, 0.8, 0.45]) { gp.push(dx * d, dy * d, 0.06); gs.push(Math.random()); }
+    }
+    gp.push(0, 0, 0.16); gs.push(0.5);
+    const gg = new THREE.BufferGeometry();
+    gg.setAttribute('position', new THREE.Float32BufferAttribute(gp, 3));
+    gg.setAttribute('aSeed', new THREE.Float32BufferAttribute(gs, 1));
+    const glintMat = new THREE.ShaderMaterial({
+      uniforms: { uTime: { value: 0 } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+      vertexShader: `uniform float uTime; attribute float aSeed; varying float vA;
+        void main() { vec4 mv = modelViewMatrix * vec4( position, 1.0 ); gl_Position = projectionMatrix * mv;
+          float tw = pow( 0.5 + 0.5 * sin( uTime * ( 1.3 + aSeed * 1.7 ) + aSeed * 40.0 ), 6.0 );
+          vA = 0.25 + 1.6 * tw; gl_PointSize = clamp( 0.45 * 900.0 / max( - mv.z, 1.0 ), 1.5, 40.0 ); }`,
+      fragmentShader: `varying float vA;
+        void main() { vec2 c = gl_PointCoord - 0.5; float r = length( c ) * 2.0;
+          float star = exp( - abs( c.x ) * 40.0 ) * exp( - abs( c.y ) * 4.0 ) + exp( - abs( c.y ) * 40.0 ) * exp( - abs( c.x ) * 4.0 );
+          float a = ( star * 0.9 + exp( - r * r * 9.0 ) * 0.6 ) * ( 1.0 - r ) * vA; if ( a < 0.004 ) discard;
+          gl_FragColor = vec4( vec3( 0.86, 0.93, 1.0 ) * a, 1.0 ); }`,
+    });
+    const glints = new THREE.Points(gg, glintMat);
+    glints.frustumCulled = false;
+    topper.add(glints);
+    topper.userData.glintMat = glintMat;
+    group.add(topper);
+    bulbs.add(TOP.x, TOP.y + R * 0.86 * TOPPER_SCALE, TOP.z, 1.8, 0.62, 0.74, 0.95);   // soft cool-white halo behind the flake
+  }
+
   // warm bounce from the lights onto the tree (as before)
   glow.add(0, 2.5, 0, 8.5, 0.32);
   glow.add(0, 8.0, 0, 6.5, 0.26);
@@ -1027,7 +1113,11 @@ function createChristmasTree({ glow, bulbs, renderer }) {
 
   return {
     group,
-    update() {},
+    update(t) {
+      // the topper turns to face the viewer (yaw only); `camera` is the scene camera from main.js
+      if (typeof camera !== 'undefined') topper.rotation.y = Math.atan2(camera.position.x - topper.position.x, camera.position.z - topper.position.z);
+      topper.userData.glintMat.uniforms.uTime.value = t;
+    },
   };
 }
 
@@ -1407,7 +1497,8 @@ function clayMat(color, roughness = 0.78) {
   return new THREE.MeshStandardMaterial({ color, roughness, metalness: 0 });
 }
 
-function buildSkater() {
+function buildSkater({ style = 'skater' } = {}) {
+  const girl = style === 'girl';   // second, standing character: skirt, bangs + ponytail, earmuffs (body/face/rig otherwise identical)
   // ---------- materials: soft matte clay skin, fabric with fine grain ----------
   const grain = (() => {                                   // tiny procedural knit grain for the fabrics
     const n = 128, d = new Uint8Array(n * n * 4);
@@ -1444,6 +1535,9 @@ function buildSkater() {
   // upper body −10% (waist → neck 0.49 → 0.441): only the chest band between the pocket (y 0.1) and the
   // shoulders (y 0.3) is shortened; pocket and hem stay put, shoulders / hood / collar / neck move down unchanged
   const TY = (y) => y - 0.049 * sm01(0.1, 0.3, y);
+  // female only: neck → waist another −10% (0.441 → 0.397); spread over the chest (y −0.06 … 0.33) so nothing looks squashed —
+  // the knit hem, skirt, legs, head, arm lengths and shoulder width stay as they are. Identity for the male skater.
+  const SQ = girl ? (y) => y - 0.044 * sm01(-0.06, 0.33, y) : (y) => y;
 
   // joint layout — IDENTICAL to the previous rig so every animation keeps working
   // arms −10% (upper 0.25 → 0.225, fore 0.23 → 0.207); legs unchanged
@@ -1457,7 +1551,7 @@ function buildSkater() {
   torso.position.y = 0.04;
   pelvis.add(torso);
   const neck = new THREE.Group();
-  neck.position.y = 0.401;            // = TY(0.45)
+  neck.position.y = SQ(0.401);        // = TY(0.45) (girl: 0.357)
   torso.add(neck);
   const head = new THREE.Group();
   head.position.y = 0.26;
@@ -1484,14 +1578,17 @@ function buildSkater() {
       const tipsF = 1 - Math.abs(Math.sin(lon * 7 + 0.9)), tipsS = 1 - Math.abs(Math.sin(lon * 6 + 0.4));
       const tips = tipsF * front + tipsS * (1 - front);
       const burn = Math.exp(-(((Math.abs(lon) - 1.12) / 0.2) ** 2));   // side locks falling in front of the ears
-      const cutFront = 0.0 + 0.2 * d.x + 0.11 * (1 - tips) ** 2;     // long fringe sweeping lower toward one side
+      const cutFront = girl
+        ? 0.56 - 0.55 * sm01(0.0, 0.42, Math.abs(d.x)) + 0.12 * sm01(0.5, 0.85, Math.abs(d.x)) + 0.02 * (1 - tips) ** 2   // (cut line +0.1 = ~10% shorter, clear of the eyes) two bangs parted in the middle, sweeping down and out to each side
+        : 0.0 + 0.2 * d.x + 0.11 * (1 - tips) ** 2;     // long fringe sweeping lower toward one side
       const cutSide = 0.03 - 0.18 * burn + 0.06 * (1 - tips) ** 1.5;
       const cutBack = -0.68 + 0.06 * (1 - tips) ** 1.5;
       const cut = (cutSide + (cutBack - cutSide) * back) * (1 - front) + cutFront * front;
       const above = d.y - cut;
       const cover = sm01(-0.03, 0.045, above);                       // soft, smooth hair edge
       const hug = 0.3 + 0.7 * sm01(0.0, 0.32, above);                 // lock ends curl in toward the head
-      const thick = (0.03 + 0.03 * sm01(-0.3, 0.85, d.y) + 0.008 * front) * hug;   // smooth (no strand grooves)
+      const bangs = girl ? front * (0.018 * sm01(0.03, 0.25, Math.abs(d.x)) - 0.012 * Math.exp(-((d.x / 0.035) ** 2)) * sm01(0.1, 0.5, d.y)) : 0;   // each bang a soft swell, a neat parting between them
+      const thick = (0.03 + 0.03 * sm01(-0.3, 0.85, d.y) + 0.008 * front + bangs) * hug;   // smooth (no strand grooves)
       const r = HR * 0.975 + cover * (HR * 0.025 + thick);
       p.setXYZ(i, d.x * r, d.y * r, d.z * r);
     }
@@ -1514,22 +1611,90 @@ function buildSkater() {
     facing(eye, eye.position);
     face.add(eye);
   }
-  const nose = new THREE.Mesh(new THREE.SphereGeometry(0.012, 20, 14), C.skin);   // barely-there nose (reads in profile)
+  const nose = new THREE.Mesh(new THREE.SphereGeometry(0.018, 24, 18), C.skin);   // small nose (1.5× the earlier 0.012)
   nose.scale.set(1, 0.8, 0.75);
   nose.position.copy(onFace(0, -0.27, 0.96, 0.997));
   face.add(nose);
-  {                                                           // small soft smile
-    const A = Math.PI * 0.62, sg = new THREE.TorusGeometry(0.021, 0.0042, 12, 40, A);
-    sg.rotateZ(-Math.PI / 2 - A / 2);
-    const smile = new THREE.Mesh(sg, C.eye);
-    const at = onFace(0, -0.36, 0.93, 0.996);
-    facing(smile, at);
-    smile.position.copy(at).add(new THREE.Vector3(0, 0.021, 0).applyQuaternion(smile.quaternion));
-    face.add(smile);
+  // (no mouth) — soft round blush on both cheeks: a thin patch of the face sphere with a radial pink-to-clear gradient
+  {
+    const cv = document.createElement('canvas'); cv.width = cv.height = 128;
+    const g = cv.getContext('2d'), gr = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+    gr.addColorStop(0, '#fff'); gr.addColorStop(0.35, '#a8a8a8'); gr.addColorStop(0.7, '#2a2a2a'); gr.addColorStop(1, '#000');
+    g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
+    const blushMat = new THREE.MeshStandardMaterial({
+      color: 0xf28b96, roughness: 0.9, transparent: true, opacity: 0.6, alphaMap: new THREE.CanvasTexture(cv),
+      depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+    });
+    for (const sx of [-1, 1]) {
+      const dir = new THREE.Vector3(0.5 * sx, -0.31, 0.8).normalize();
+      const th = Math.acos(dir.y), ph = Math.atan2(dir.z, -dir.x), w = 0.24;
+      const patch = new THREE.Mesh(new THREE.SphereGeometry(HR * 1.0025, 24, 24, ph - w, 2 * w, th - w, 2 * w), blushMat);
+      patch.renderOrder = 2;
+      face.add(patch);
+    }
   }
   const neckSkin = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.062, 0.12, 20), C.skin);
   neckSkin.position.y = 0.02;
   neck.add(neckSkin);
+  if (girl) {
+    // sleek straight ponytail: one smooth tube falling straight down from the back of the head with a gentle
+    // backward flow, very soft lengthwise ridges for straight strands; even width (a touch fuller low), softly rounded end
+    const pts = [[0, 0.1, -0.25], [0, 0.08, -0.335], [0, -0.02, -0.372], [0, -0.14, -0.384], [0, -0.26, -0.383], [0, -0.37, -0.374], [0, -0.45, -0.362]]
+      .map(([x, y, z]) => new THREE.Vector3(x, y, z));
+    const curve = new THREE.CatmullRomCurve3(pts);
+    const TS = 120, RS = 28, tg = new THREE.TubeGeometry(curve, TS, 1, RS, false), tp = tg.attributes.position, c = new THREE.Vector3();
+    for (let j = 0; j <= TS; j++) {
+      const u = j / TS;
+      const r = (0.054 + 0.014 * sm01(0.02, 0.2, u) + 0.006 * sm01(0.35, 0.85, u)) * Math.sqrt(Math.max(0, 1 - (Math.max(0, u - 0.88) / 0.12) ** 2));
+      curve.getPointAt(u, c);
+      for (let i = 0; i <= RS; i++) {
+        const n = j * (RS + 1) + i, rr = r * (1 + 0.025 * Math.cos((i / RS) * Math.PI * 2 * 9) * sm01(0.12, 0.3, u));
+        tp.setXYZ(n, c.x + (tp.getX(n) - c.x) * rr, c.y + (tp.getY(n) - c.y) * rr, c.z + (tp.getZ(n) - c.z) * rr);
+      }
+    }
+    tg.computeVertexNormals();
+    face.add(new THREE.Mesh(tg, C.hair));
+    const tipBall = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 18), C.hair);
+    curve.getPointAt(1, c); tipBall.position.copy(c); tipBall.scale.setScalar(0.004);   // just closes the rounded end's pole
+    face.add(tipBall);
+    // pearl hair tie: a neat ring of small luminous ivory pearls with a silvery sheen around the ponytail base
+    {
+      const pearl = new THREE.MeshPhysicalMaterial({
+        color: 0xf4efe4, roughness: 0.16, metalness: 0.12, clearcoat: 1, clearcoatRoughness: 0.06,
+        sheen: 0.5, sheenColor: 0xdde5f0, sheenRoughness: 0.25, iridescence: 0.25, iridescenceIOR: 1.4,
+      });
+      const pg = new THREE.SphereGeometry(0.0115, 20, 14), N = 20, RR = 0.0715;
+      const tie = new THREE.Group();
+      for (let k = 0; k < N; k++) {
+        const t = (k / N) * Math.PI * 2, m = new THREE.Mesh(pg, pearl);
+        m.position.set(Math.cos(t) * RR, Math.sin(t) * RR, 0);
+        tie.add(m);
+      }
+      tie.position.copy(curve.getPointAt(0.1));
+      tie.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), curve.getTangentAt(0.1));   // band wraps around the tail
+      face.add(tie);
+    }
+
+    // ivory fluffy earmuffs: two soft round covers over the ears + a simple curved headband over the hair
+    const fur = new THREE.MeshPhysicalMaterial({ color: 0xf4ecdc, roughness: 1, sheen: 1, sheenRoughness: 0.45, sheenColor: 0xffffff, bumpMap: grain, bumpScale: 0.8 });
+    const band = new THREE.MeshStandardMaterial({ color: 0xece2cf, roughness: 0.55 });
+    const fg = new THREE.IcosahedronGeometry(1, 5), fp = fg.attributes.position, q = new THREE.Vector3();
+    for (let i = 0; i < fp.count; i++) {                       // gentle fluffy lumps (still a smooth clay form)
+      q.fromBufferAttribute(fp, i);
+      const k = 1 + 0.05 * Math.sin(q.x * 9 + q.y * 7) * Math.sin(q.y * 8 - q.z * 9) + 0.03 * Math.sin(q.z * 13 + q.x * 5);
+      fp.setXYZ(i, q.x * k, q.y * k, q.z * k);
+    }
+    fg.computeVertexNormals();
+    for (const sx of [-1, 1]) {
+      const muff = new THREE.Mesh(fg, fur);
+      muff.scale.set(0.0575, 0.1035, 0.0955);              // 15% larger (inner face kept at the same distance from the head)
+      muff.position.set(sx * 0.3225, -0.045, -0.025);
+      face.add(muff);
+    }
+    const arc = [];
+    for (let k = 0; k <= 24; k++) { const a = Math.PI * (k / 24); arc.push(new THREE.Vector3(Math.cos(a) * 0.3255, -0.04 + Math.sin(a) * 0.37, -0.03)); }
+    face.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(arc), 64, 0.016, 12, false), band));
+  }
 
   // ---------- turtleneck knit body: one soft rounded shell with a ribbed hem band ----------
   // 10% shorter than the old hoodie (neck → hem 0.617 → 0.555): only the part below y 0.25 is compressed (SHORT),
@@ -1542,7 +1707,7 @@ function buildSkater() {
     [0.217, -0.1], [0.221, -0.06], [0.219, 0.04], [0.219, 0.16], [0.221, 0.25], [0.214, 0.315],
     [0.199, 0.37], [0.176, 0.41], [0.146, 0.442], [0.113, 0.466], [0.09, 0.481], [0.078, 0.495],
     [0.068, 0.5], [0.06, 0.492],
-  ].map(([r, y]) => [r, TY(SHORT(y))])), 96), C.knit);
+  ].map(([r, y]) => [r, SQ(TY(SHORT(y)))])), 96), C.knit);
   hoodieBody.scale.set(HB.sx, 1, HB.sz);
   torso.add(hoodieBody);
   // ---------- turtleneck: a soft folded collar hugging the neck, the head resting just inside it ----------
@@ -1550,7 +1715,7 @@ function buildSkater() {
     const collar = new THREE.Mesh(new THREE.LatheGeometry(prof([
       [0.1, 0.4], [0.13, 0.415], [0.152, 0.435], [0.16, 0.46], [0.157, 0.482], [0.147, 0.498],
       [0.13, 0.508], [0.11, 0.51], [0.09, 0.502], [0.075, 0.49],
-    ]), 96), C.knit);
+    ].map(([r, y]) => [r, SQ(y)])), 96), C.knit);
     collar.scale.set(1.1, 1, 1.0);
     torso.add(collar);
   }
@@ -1618,7 +1783,7 @@ function buildSkater() {
 
   const arm = (side) => {
     const shoulder = new THREE.Group();
-    shoulder.position.set(0.25 * side, 0.311, 0);   // = TY(0.36)
+    shoulder.position.set(0.25 * side, SQ(0.311), 0);   // = TY(0.36) (girl: 0.267)
     torso.add(shoulder);
     const elbow = new THREE.Group();
     elbow.position.y = -L.upper;
@@ -1656,14 +1821,23 @@ function buildSkater() {
       const f = sm01(-0.31, -0.41, y), a = sm01(-0.46, -0.62, y);
       return [1 - f, f * (1 - a), a];
     };
-    // trouser leg: round hip ball → relaxed leg → slightly wider soft hem resting on the boot
-    skinLimb(hip, [hip, knee, ankle], [
-      ...dome(0.108),
-      [-0.05, 0.108], [-0.15, 0.106], [-0.3, 0.104], [-0.36, 0.103], [-0.42, 0.106], [-0.48, 0.111],
-      [-0.53, 0.116], [-0.552, 0.118], [-0.563, 0.115], [-0.569, 0.11], [-0.567, 0.105],
-    ], legW, C.pants);
-    // knee filler (same idea as the elbow)
-    knee.add(new THREE.Mesh(new THREE.SphereGeometry(0.099, 32, 24), C.pants));
+    if (!girl) {
+      // trouser leg: round hip ball → relaxed leg → slightly wider soft hem resting on the boot
+      skinLimb(hip, [hip, knee, ankle], [
+        ...dome(0.108),
+        [-0.05, 0.108], [-0.15, 0.106], [-0.3, 0.104], [-0.36, 0.103], [-0.42, 0.106], [-0.48, 0.111],
+        [-0.53, 0.116], [-0.552, 0.118], [-0.563, 0.115], [-0.569, 0.11], [-0.567, 0.105],
+      ], legW, C.pants);
+      // knee filler (same idea as the elbow)
+      knee.add(new THREE.Mesh(new THREE.SphereGeometry(0.099, 32, 24), C.pants));
+    } else {
+      // bare leg under the mini skirt: round hip ball → slim leg → into the boot shaft
+      skinLimb(hip, [hip, knee, ankle], [
+        ...dome(0.094),
+        [-0.05, 0.094], [-0.2, 0.088], [-0.36, 0.079], [-0.45, 0.075], [-0.52, 0.073], [-0.54, 0.064],
+      ], legW, C.skin);
+      knee.add(new THREE.Mesh(new THREE.SphereGeometry(0.076, 24, 18), C.skin));
+    }
     // skate: high-top round boot — shaft visible under the trouser hem, round toe cap — on a silver
     // blade holder with two windows and a curved runner + toe pick (runner bottom = same ice contact height)
     skinLimb(hip, [hip, knee, ankle], [
@@ -1704,6 +1878,15 @@ function buildSkater() {
     }
     return { hip, knee, ankle };
   };
+
+  if (girl) {
+    // simple black A-line mini skirt hanging from the hips (top tucked under the knit hem)
+    const skirt = new THREE.Mesh(new THREE.LatheGeometry(prof([      // profile listed bottom → top so the surface faces outward
+      [0.238, -0.224], [0.258, -0.226], [0.264, -0.212], [0.252, -0.185], [0.226, -0.12], [0.203, -0.05], [0.19, 0.0],
+    ]), 72), C.pants);
+    skirt.scale.set(1.12, 1, 0.95);
+    pelvis.add(skirt);
+  }
 
   const rig = {
     root, body, pelvis, torso, neck, head,
@@ -2430,6 +2613,29 @@ console.info('[WinterRink]', world.stats);
 // ---- character (stand-in; keep your own in the real project) ---------------
 const player = new PlaceholderPlayer(scene, world.bounds);
 addSoftFill(player.mesh, LIGHTING.characterFill);
+
+// ---- second character (2026-11-02): an independent copy of the skater (own rig and bones) that just stands ----
+// Same model and art style; only her outfit, hair and earmuffs differ (buildSkater style 'girl'). No animation,
+// no input, no collision. Natural relaxed standing pose = the original skater's idle pose; she stands a few
+// metres ahead and to the right of the player's starting spot, turned toward the player.
+const skater2 = (() => {
+  const R = buildSkater({ style: 'girl' }), Lg = R.L;
+  for (const [leg, side] of [[R.legL, 1], [R.legR, -1]]) {
+    leg.hip.rotation.set(-0.08, 0, 0.04 * side);
+    leg.knee.rotation.x = 0.14;
+    leg.ankle.rotation.set(-(-0.08 + 0.14), 0, -0.04 * side * 0.6);
+  }
+  R.pelvis.position.y = (Lg.thigh * Math.cos(-0.08) + Lg.shin * Math.cos(0.06)) * Math.cos(0.04) + Lg.foot;   // blades on the ice
+  R.torso.rotation.set(0.02, 0, 0);
+  R.neck.rotation.set(-0.014, 0, 0);
+  for (const [arm, side] of [[R.armL, 1], [R.armR, -1]]) { arm.shoulder.rotation.set(0.05, 0, 0.2 * side); arm.elbow.rotation.x = -0.3; }
+  R.root.position.set(2.6, world.bounds.iceY, 19.6);
+  R.root.rotation.y = Math.atan2(0 - 2.6, world.bounds.rz * 0.7 - 19.6);   // faces the player's start position
+  R.root.name = 'Skater2';
+  scene.add(R.root);
+  addSoftFill(R.root, LIGHTING.characterFill);                             // same character lighting as the player
+  return R;
+})();
 const cine = new FollowCamera(camera);
 const controls = new PointerControls(renderer.domElement, camera, cine, player, world.bounds, scene);
 const skateFx = new SkateFX(scene, player, world.bounds);
