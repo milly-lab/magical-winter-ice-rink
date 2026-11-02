@@ -6,9 +6,11 @@
 !/preview.html
 !/PROJECT_CONTEXT.md
 !/references/
-/references/*
+!/references/*
 !/references/character-reference.jpg
 !/winter-rink/
+!/assets/
+!/assets/*
 
 # never commit
 node_modules/
