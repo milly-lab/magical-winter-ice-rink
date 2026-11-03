@@ -942,7 +942,7 @@ function createRoseGeometry() {
     leaf.translate(p.x, p.y, p.z);
     green.push(leaf);
   }
-  return { head: mergeGeometries(head), green: mergeGeometries(green) };
+  return { head: mergeGeometries(head), green: mergeGeometries(green), base: new THREE.Vector3(top.x, Y0, top.z), center: new THREE.Vector3(top.x, Y0 + 0.12, top.z) };
 }
 
 // soft radial blob texture for fake shadows (dark navy) and light spill (warm)
@@ -1296,11 +1296,13 @@ function createWinterScenery({ glow, renderer }) {
   ];
   // each whole rose leans toward the rink interior (radially, from its own spot) by a fixed 10–15° angle
   const ROSE_TILT_DEG = [12, 14, 10.5, 13, 11, 15, 12.5, 10, 13.5, 11.5];
+  const roseItems = [], roseRef = { items: roseItems };              // handed to the rose-collection system (main.js)
   {
     const r3 = mulberry32(5150), parts = createRoseGeometry();
     const roseMat = exteriorMaterial({ color: 0xf7f4ef, roughness: 0.82, emissive: 0x34322f, emissiveIntensity: 0.5 }, glow);   // soft white clay
     const leafMat = exteriorMaterial({ color: 0x5a8f63, roughness: 0.8, side: THREE.DoubleSide }, glow);                      // muted natural green (thin leaves: both sides)
     const heads = new THREE.InstancedMesh(parts.head, roseMat, ROSES.length);
+    roseItems.length = 0;
     const greens = new THREE.InstancedMesh(parts.green, leafMat, ROSES.length);
     heads.name = 'RoseHeads'; greens.name = 'RoseStems';
     const m = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler();
@@ -1316,10 +1318,33 @@ function createWinterScenery({ glow, renderer }) {
       q.setFromEuler(e).premultiply(lean);                            // spin about its own stem first, then lean the whole plant
       m.compose(new THREE.Vector3(x, groundAt(x, z), z), q, new THREE.Vector3(sc, sc, sc));
       heads.setMatrixAt(i, m); greens.setMatrixAt(i, m);
-      blob(x, z, 1.1 * sc);
+      roseItems.push({ matrix: m.clone(), center: parts.center.clone().applyMatrix4(m), scale: sc, pos: [x, z], blob: blob(x, z, 1.1 * sc) });
       placed.push([x, z, 1.2]);
     });
     for (const im of [heads, greens]) { im.instanceMatrix.needsUpdate = true; im.computeBoundingSphere(); group.add(im); }
+    roseRef.heads = heads; roseRef.greens = greens; roseRef.parts = parts;
+    // respawn (2026-11-03): move rose i to a new random spot near the boards, with the same placement rules as the
+    // original roses (7–10.5 m outside the boards, clear of trees / cabins / snowflakes / the reindeer), at least 10 m
+    // from where it was and 12 m from every other rose; same size, new spin and a new 10–15° lean toward the ice
+    roseRef.relocate = (i) => {
+      const it = roseItems[i], up = new THREE.Vector3(0, 1, 0);
+      for (let tries = 0; tries < 80; tries++) {
+        const [x, z] = at(Math.random() * Math.PI * 2, 7 + Math.random() * 3.5);
+        if (Math.hypot(x - it.pos[0], z - it.pos[1]) < 10) continue;
+        if (roseItems.some((o, j) => j !== i && Math.hypot(x - o.pos[0], z - o.pos[1]) < 12)) continue;
+        if (!clear(x, z, 1.2)) continue;
+        const n = rinkNormal(x, z), inward = new THREE.Vector3(-n.x, 0, -n.z);
+        const lean = new THREE.Quaternion().setFromAxisAngle(up.clone().cross(inward).normalize(), THREE.MathUtils.degToRad(10 + Math.random() * 5));
+        const qq = new THREE.Quaternion().setFromAxisAngle(up, Math.random() * Math.PI * 2).premultiply(lean);
+        it.matrix.compose(new THREE.Vector3(x, groundAt(x, z), z), qq, new THREE.Vector3(it.scale, it.scale, it.scale));
+        it.center = parts.center.clone().applyMatrix4(it.matrix);
+        it.pos = [x, z];
+        it.blob.position.set(x, groundAt(x, z) + 0.03, z);                // its soft shadow moves with it
+        it.blob.quaternion.setFromUnitVectors(up, normalAt(x, z));
+        return true;
+      }
+      return false;
+    };
   }
 
   // everything above is drawn by the main camera only (not by the ice reflection)
@@ -1330,6 +1355,7 @@ function createWinterScenery({ glow, renderer }) {
   return {
     group,
     stats: { trees: TREES.length, cabins: CABINS.length, snowflakes: flakeXf.length, triangles: Math.round(tris) },
+    roses: roseRef,
     layout: { trees: TREES, flakes: FLAKES, flakeXf: flakeXf.map(([x, y, z, , size, v]) => [x, y, z, size, v]), deer: [deerX, deerZ], cabins: CABINS.map((c) => at(c.theta, c.out)) },
     update(t) {
       // reindeer: slow look around, soft nod, breathing
@@ -1823,11 +1849,14 @@ function addSoftFill(root, { color, intensity, boost = 1 }) {
 
 // Gentle falling snow, animated entirely on the GPU (one draw call).
 
-function createSnowfall({ count = 4800, area = 260, height = 40 } = {}) {
+// (+ `local` extra flakes in the same Points: hidden normally, shown only during the proposal — see setProposal)
+function createSnowfall({ count = 4800, area = 260, height = 40, local = 1600, localBox = 10, localH = 6.5 } = {}) {
   const rng = mulberry32(5);
-  const pos = new Float32Array(count * 3);
-  const phase = new Float32Array(count);
-  const speed = new Float32Array(count);
+  const total = count + local;
+  const pos = new Float32Array(total * 3);
+  const phase = new Float32Array(total);
+  const speed = new Float32Array(total);
+  const isLocal = new Float32Array(total);
   for (let i = 0; i < count; i++) {
     pos[i * 3] = (rng() - 0.5) * area;
     pos[i * 3 + 1] = rng() * height;
@@ -1835,22 +1864,53 @@ function createSnowfall({ count = 4800, area = 260, height = 40 } = {}) {
     phase[i] = rng() * Math.PI * 2;
     speed[i] = 0.6 + rng() * 0.9;
   }
+  const rngL = mulberry32(91);                                      // separate stream: the normal snow stays identical
+  for (let i = count; i < total; i++) {
+    pos[i * 3] = rngL() * localBox;
+    pos[i * 3 + 1] = rngL() * localH;
+    pos[i * 3 + 2] = rngL() * localBox;
+    phase[i] = rngL() * Math.PI * 2;
+    speed[i] = 0.32 + rngL() * 0.38;                                 // slow, gentle fall
+    isLocal[i] = 1;
+  }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   geo.setAttribute('aPhase', new THREE.BufferAttribute(phase, 1));
   geo.setAttribute('aSpeed', new THREE.BufferAttribute(speed, 1));
+  geo.setAttribute('aLocal', new THREE.BufferAttribute(isLocal, 1));
 
   const mat = new THREE.ShaderMaterial({
-    uniforms: { uTime: { value: 0 }, uHeight: { value: height }, uViewportH: { value: 1080 } },
+    uniforms: { uTime: { value: 0 }, uHeight: { value: height }, uViewportH: { value: 1080 },
+      uLocal: { value: 0 }, uGain: { value: 1 }, uCenter: { value: new THREE.Vector3() },
+      uBox: { value: localBox }, uLocalH: { value: localH } },
     transparent: true,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
     fog: false,
     vertexShader: /* glsl */ `
       uniform float uTime; uniform float uHeight; uniform float uViewportH;
-      attribute float aPhase; attribute float aSpeed;
-      varying float vA;
+      uniform float uLocal; uniform float uGain; uniform vec3 uCenter; uniform float uBox; uniform float uLocalH;
+      attribute float aPhase; attribute float aSpeed; attribute float aLocal;
+      varying float vA; varying float vCone;
       void main() {
+        vCone = 0.0;
+        if ( aLocal > 0.5 ) {   // proposal flakes: a 10 m box around the couple, small, drifting slowly
+          if ( uLocal < 0.001 ) { gl_Position = vec4( 2.0, 2.0, 2.0, 1.0 ); gl_PointSize = 0.0; vA = 0.0; return; }
+          vec3 q = position;
+          q.y = mod( q.y - uTime * aSpeed, uLocalH );
+          q.x = mod( q.x + sin( uTime * 0.37 + aPhase ) * 0.35 + uTime * 0.06, uBox ) - uBox * 0.5;
+          q.z = mod( q.z + cos( uTime * 0.29 + aPhase * 1.7 ) * 0.3, uBox ) - uBox * 0.5;
+          vec4 mv = modelViewMatrix * vec4( uCenter + q, 1.0 );
+          gl_Position = projectionMatrix * mv;
+          float dist = max( - mv.z, 0.1 );
+          gl_PointSize = clamp( 0.04 * uViewportH * projectionMatrix[ 1 ][ 1 ] * 0.5 / dist, 1.0, 5.0 );
+          float edge = 1.0 - smoothstep( uBox * 0.32, uBox * 0.5, max( abs( q.x ), abs( q.z ) ) );
+          // inside the spotlight cone (same shape as the cone mesh: r 1.45 at the ice → 0.1 at 5.6 m)
+          float hc = q.y / 5.6, rc = mix( 1.45, 0.1, clamp( hc, 0.0, 1.0 ) );
+          vCone = ( 1.0 - smoothstep( rc * 0.7, rc * 1.05, length( q.xz ) ) ) * ( 1.0 - smoothstep( 0.85, 1.0, hc ) );
+          vA = uLocal * edge * smoothstep( 0.0, 0.4, q.y ) * smoothstep( uLocalH, uLocalH - 0.8, q.y );
+          return;
+        }
         vec3 p = position;
         p.y = mod( p.y - uTime * aSpeed, uHeight );
         p.x += sin( uTime * 0.3 + aPhase ) * 1.2;
@@ -1859,14 +1919,17 @@ function createSnowfall({ count = 4800, area = 260, height = 40 } = {}) {
         gl_Position = projectionMatrix * mv;
         float dist = max( - mv.z, 0.1 );
         gl_PointSize = clamp( 0.14 * uViewportH * projectionMatrix[ 1 ][ 1 ] * 0.5 / dist, 1.0, 10.0 );
-        vA = 0.32 * exp( - pow( dist * 0.012, 2.0 ) ) * smoothstep( 0.0, 2.0, p.y );
+        vA = 0.32 * exp( - pow( dist * 0.012, 2.0 ) ) * smoothstep( 0.0, 2.0, p.y ) * uGain;
       }`,
     fragmentShader: /* glsl */ `
-      varying float vA;
+      uniform float uGain;
+      varying float vA; varying float vCone;
       void main() {
         float r = length( gl_PointCoord - 0.5 ) * 2.0;
         float a = smoothstep( 1.0, 0.2, r ) * vA;
-        gl_FragColor = vec4( vec3( 0.78, 0.84, 0.95 ) * a, 1.0 );
+        // proposal flakes: faint in the dark, catching warm light inside the spotlight cone
+        vec3 c = vCone > 0.0 ? mix( vec3( 0.78, 0.84, 0.95 ) * 1.6, vec3( 1.0, 0.92, 0.8 ) * 5.0, vCone ) : vec3( 0.78, 0.84, 0.95 );
+        gl_FragColor = vec4( c * a, 1.0 );
       }`,
   });
   const points = new THREE.Points(geo, mat);
@@ -1880,6 +1943,13 @@ function createSnowfall({ count = 4800, area = 260, height = 40 } = {}) {
     },
     setViewportHeight(h) {
       mat.uniforms.uViewportH.value = h;
+    },
+    // proposal (w 0 → 1): fine flakes around `center` (the couple, on the ice) + the normal snow kept visible in the
+    // darker exposure; w = 0 is exactly the normal snowfall
+    setProposal(w, center) {
+      mat.uniforms.uLocal.value = w;
+      mat.uniforms.uGain.value = 1 + w;
+      if (center) mat.uniforms.uCenter.value.copy(center);
     },
   };
 }
@@ -1938,6 +2008,8 @@ function createWinterWorld({ scene, renderer }) {
   return {
     root,
     stats: { bulbs: bulbs.count, trees: 1, pointLights: lights.pointLights.length, scenery: scenery.stats },
+    roses: scenery.roses,
+    snow: { setProposal: snow.setProposal },                        // proposal snowfall (same snow system)
     // handy for whatever controls the character: walkable ice area
     bounds: { rx: RINK.rx, rz: RINK.rz, iceY: RINK.iceY, islandRadius: ISLAND_RADIUS, dist: rinkDist, normal: rinkNormal },
     update(t) {
@@ -3842,6 +3914,625 @@ class PartnerSkating {
   }
 }
 
+// ===== story/roseProposal.js =====
+// (2026-11-03) White Rose Collection + "Ask Out" proposal sequence.
+//  - RoseCollector: the 10 existing exterior roses (world.roses) become individually clickable → "Pick Up" button
+//    → pulse, soft white glow, burst + light snow particles → that instance is hidden for the rest of the session.
+//    Counter (top right) and toasts; at 10/10 the "Ask Out" button in her menu unlocks.
+//  - ProposalSequence: ~10 s cinematic using the two existing rigs (joint rotations + the existing arm IK).
+//    Temporarily takes over: exposure (renderer.toneMappingExposure), the two characters' soft-fill uniforms,
+//    the action buttons and both characters (all saved and restored). The camera stays free (rotate / zoom); it just
+//    follows the couple. No real lights are added: two soft pools of light on the ice + the characters' own fill.
+//    Ending (v2): both standing face to face, holding hands; she keeps the bouquet in her right hand for 60 s.
+
+// ---------------- UI: rose counter (top right, under the FPS counter) + toast ----------------
+const STORY_UI = (() => {
+  const font = 'font:300 clamp(11px, 3vw, 13px)/1.35 "Helvetica Neue", Arial, sans-serif';
+  const counter = document.createElement('div');
+  counter.style.cssText = [
+    'position:fixed', 'top:40px', 'right:12px', 'z-index:12', 'pointer-events:none', 'display:flex', 'align-items:center',
+    'gap:6px', 'padding:4px 11px 4px 7px', 'border-radius:999px', 'background:rgba(6,12,26,.55)', 'color:#f6f1e7', font,
+    'letter-spacing:.08em', 'backdrop-filter:blur(4px)', '-webkit-backdrop-filter:blur(4px)', 'transition:transform .25s',
+  ].join(';');
+  // icon (2026-11-03): a white rose bud seen from above — layered petals spiralling in, green leaf tips at the sides
+  counter.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M0.8 12.6c1.8-2.6 4.2-3 6-1.5-1.3 2.2-3.6 2.8-6 1.5z" fill="#7fae86"/>
+      <path d="M23.2 11.4c-1.8 2.6-4.2 3-6 1.5 1.3-2.2 3.6-2.8 6-1.5z" fill="#7fae86"/>
+      <g fill="#f5f1ea" stroke="#cdc4b8" stroke-width=".6"><circle cx="12.00" cy="8.30" r="3.9"/><circle cx="15.52" cy="10.86" r="3.9"/><circle cx="14.17" cy="14.99" r="3.9"/><circle cx="9.83" cy="14.99" r="3.9"/><circle cx="8.48" cy="10.86" r="3.9"/></g>
+      <g fill="#faf7f2" stroke="#d3cbc0" stroke-width=".55"><circle cx="13.41" cy="10.59" r="2.7"/><circle cx="13.41" cy="13.41" r="2.7"/><circle cx="10.59" cy="13.41" r="2.7"/><circle cx="10.59" cy="10.59" r="2.7"/></g>
+      <circle cx="12" cy="12" r="1.9" fill="#fdfcf9" stroke="#cbc2b6" stroke-width=".55"/>
+      <path d="M11.3 11.5c.5-.6 1.5-.5 1.7.3" stroke="#c4bbae" stroke-width=".55" fill="none" stroke-linecap="round"/>
+    </svg><span>0/10</span>`;
+  const label = counter.querySelector('span');
+  const toast = document.createElement('div');
+  toast.style.cssText = [
+    'position:fixed', 'left:50%', 'top:14px', 'transform:translate(-50%,-8px)', 'z-index:13', 'pointer-events:none',
+    'max-width:min(84vw, 440px)', 'text-align:center', 'padding:9px 18px', 'border-radius:999px', 'background:rgba(6,12,26,.74)',
+    'color:#f7f2e8', font, 'letter-spacing:.05em', 'opacity:0', 'transition:opacity .5s, transform .5s',
+    'border:1px solid rgba(247,242,232,.35)', 'backdrop-filter:blur(4px)', '-webkit-backdrop-filter:blur(4px)',
+  ].join(';');
+  let timer = 0;
+  return {
+    mount() { document.body.appendChild(counter); document.body.appendChild(toast); },
+    setCount(n, total) {
+      label.textContent = `${n}/${total}`;
+      counter.style.transform = 'scale(1.12)';
+      setTimeout(() => { counter.style.transform = 'scale(1)'; }, 220);
+    },
+    toast(text, seconds = 3) {
+      toast.textContent = text;
+      toast.style.opacity = '1';
+      toast.style.transform = 'translate(-50%,0)';
+      clearTimeout(timer);
+      timer = setTimeout(() => { toast.style.opacity = '0'; toast.style.transform = 'translate(-50%,-8px)'; }, seconds * 1000);
+    },
+  };
+})();
+
+// soft round sprite texture (white → clear)
+function storyRadialTexture(inner, outer) {
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = 64;
+  const g = cv.getContext('2d'), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  gr.addColorStop(0, inner); gr.addColorStop(1, outer);
+  g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(cv);
+}
+
+// ---------------- White rose collection ----------------
+class RoseCollector {
+  constructor({ roses, scene, camera, dom, pillStyle, onCollect }) {
+    this.R = roses;                       // { heads, greens, items: [{ matrix, center, scale, blob }] }
+    this.camera = camera;
+    this.dom = dom;
+    this.onCollect = onCollect;
+    this.total = roses.items.length;
+    this.n = 0;                           // total successful collections this session (respawns never add to it)
+    roses.items.forEach((it) => { it.available = true; });
+    this.respawns = [];                   // collected roses waiting to come back (~5 s)
+    this.grows = [];                      // respawned roses growing back in
+    this.anims = [];
+    this.sel = -1;
+    // contextual "Pick Up" button, placed over the selected rose
+    const b = document.createElement('button');
+    b.textContent = 'Pick Up';
+    b.style.cssText = pillStyle + ';position:fixed;left:0;top:0;z-index:11;display:none;transform:translate(-50%,-100%)';
+    b.addEventListener('pointerdown', (e) => e.stopPropagation());
+    b.addEventListener('click', (e) => { e.stopPropagation(); b.blur(); if (this.sel >= 0) this.collect(this.sel); });
+    document.body.appendChild(b);
+    this.btn = b;
+    // glow sprite + snow-burst particles (small fixed pools, reused)
+    this.glowTex = storyRadialTexture('rgba(255,255,255,0.9)', 'rgba(255,255,255,0)');
+    this.glows = [];
+    this.scene = scene;
+    const N = 72;
+    this.pN = N; this.pNext = 0;
+    this.pPos = new Float32Array(N * 3); this.pVel = new Float32Array(N * 3);
+    this.pLife = new Float32Array(N); this.pMax = new Float32Array(N).fill(1);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(this.pPos, 3));
+    this.pAlpha = new THREE.BufferAttribute(new Float32Array(N), 1);
+    geo.setAttribute('aAlpha', this.pAlpha);
+    this.points = new THREE.Points(geo, new THREE.ShaderMaterial({
+      uniforms: { uScale: { value: 600 } }, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+      vertexShader: `attribute float aAlpha; varying float vA; uniform float uScale;
+        void main() { vec4 mv = modelViewMatrix * vec4( position, 1.0 ); gl_Position = projectionMatrix * mv;
+          vA = aAlpha; gl_PointSize = clamp( 0.09 * uScale / max( - mv.z, 0.1 ), 1.0, 18.0 ); }`,
+      fragmentShader: `varying float vA; void main() { float r = length( gl_PointCoord - 0.5 ) * 2.0;
+          float a = smoothstep( 1.0, 0.0, r ) * vA; if ( a < 0.01 ) discard; gl_FragColor = vec4( vec3( 0.92, 0.95, 1.0 ) * a, 1.0 ); }`,
+    }));
+    this.points.frustumCulled = false;
+    this.points.layers.set(EXTERIOR_LAYER);
+    scene.add(this.points);
+  }
+  get count() { return this.n; }
+  setViewportHeight(h) { this.points.material.uniforms.uScale.value = h; }
+  // canvas tap (before the partner menu): true = consumed
+  handleTap(raycaster) {
+    if (this.sel >= 0) { this.close(); return true; }             // like the partner menu: a tap elsewhere closes it
+    const ray = raycaster.ray;
+    let best = -1, bestT = Infinity;
+    this.R.items.forEach((it, i) => {
+      if (!it.available) return;
+      const t = it.center.clone().sub(ray.origin).dot(ray.direction);
+      if (t <= 0) return;
+      const r = Math.max(0.42 * it.scale, t * 0.012);             // generous: the flower head, or ~0.7° when far away
+      if (ray.distanceSqToPoint(it.center) > r * r) return;
+      if (t < bestT) { bestT = t; best = i; }
+    });
+    if (best < 0) return false;
+    this.sel = best;
+    this.btn.style.display = 'block';
+    this.place();
+    return true;
+  }
+  close() { this.sel = -1; this.btn.style.display = 'none'; }
+  place() {
+    if (this.sel < 0) return;
+    const it = this.R.items[this.sel];
+    const p = it.center.clone().add(new THREE.Vector3(0, 0.45 * it.scale, 0)).project(this.camera);
+    if (p.z > 1) { this.btn.style.visibility = 'hidden'; return; }
+    this.btn.style.visibility = 'visible';
+    const r = this.dom.getBoundingClientRect();
+    this.btn.style.left = `${r.left + (p.x * 0.5 + 0.5) * r.width}px`;
+    this.btn.style.top = `${r.top + (-p.y * 0.5 + 0.5) * r.height - 6}px`;
+  }
+  collect(i) {
+    this.close();
+    const item = this.R.items[i];
+    if (!item.available) return;                                  // a rose in its pick-up animation never counts twice
+    item.available = false;
+    this.n += 1;
+    this.respawns.push({ i, t: 0 });
+    let glow = this.glows.find((g) => !g.visible);
+    if (!glow) {
+      glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glowTex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0 }));
+      glow.layers.set(EXTERIOR_LAYER);
+      this.scene.add(glow);
+      this.glows.push(glow);
+    }
+    glow.visible = true;
+    glow.position.copy(this.R.items[i].center);
+    this.anims.push({ i, t: 0, glow, burst: false });
+    this.onCollect(this.n, this.total);
+  }
+  _burst(c, s) {
+    for (let k = 0; k < 24; k++) {
+      const j = this.pNext; this.pNext = (j + 1) % this.pN;
+      const a = Math.random() * Math.PI * 2, sp = (0.5 + Math.random() * 0.9) * s;
+      this.pPos.set([c.x, c.y, c.z], j * 3);
+      this.pVel.set([Math.cos(a) * sp, (0.4 + Math.random() * 1.1) * s, Math.sin(a) * sp], j * 3);
+      this.pMax[j] = this.pLife[j] = 0.8 + Math.random() * 0.6;
+    }
+  }
+  // per rendered frame
+  update(dt) {
+    this.place();
+    const T = new THREE.Matrix4(), S = new THREE.Matrix4(), M = new THREE.Matrix4(), zero = new THREE.Matrix4().makeScale(0, 0, 0);
+    for (const A of this.anims) {
+      A.t += dt;
+      const it = this.R.items[A.i], t = A.t, c = it.center;
+      // soft pulse: grow, settle, then shrink away into the burst
+      const s = t < 0.22 ? 1 + 0.2 * psSm(0, 0.22, t) : t < 0.42 ? 1.2 - 0.12 * psSm(0.22, 0.42, t) : 1.08 * (1 - psSm(0.42, 0.6, t));
+      if (s > 0.002) {
+        M.copy(T.makeTranslation(c.x, c.y, c.z)).multiply(S.makeScale(s, s, s)).multiply(T.makeTranslation(-c.x, -c.y, -c.z)).multiply(it.matrix);
+      } else M.copy(zero);
+      this.R.heads.setMatrixAt(A.i, M); this.R.greens.setMatrixAt(A.i, M);
+      this.R.heads.instanceMatrix.needsUpdate = true; this.R.greens.instanceMatrix.needsUpdate = true;
+      // subtle white glow, peaking at the burst
+      A.glow.material.opacity = 0.32 * psSm(0.05, 0.45, t) * (1 - psSm(0.62, 1.15, t));
+      A.glow.scale.setScalar(it.scale * (0.55 + 0.45 * psSm(0, 1.1, t)));
+      if (!A.burst && t >= 0.5) { A.burst = true; this._burst(c, it.scale); if (it.blob) it.blob.visible = false; }
+      if (t >= 1.2) { A.done = true; A.glow.visible = false; }
+    }
+    this.anims = this.anims.filter((A) => !A.done);
+    // respawn: ~5 s after a pick-up the rose comes back somewhere new (not counted) and can be picked again
+    for (const Rp of this.respawns) {
+      Rp.t += dt;
+      if (Rp.t < 5 || this.anims.some((A) => A.i === Rp.i)) continue;
+      if (!this.R.relocate(Rp.i)) continue;                        // no free spot this frame → try again next frame
+      Rp.done = true;
+      const it = this.R.items[Rp.i];
+      it.available = true;
+      if (it.blob) it.blob.visible = true;
+      this.grows.push({ i: Rp.i, t: 0 });
+    }
+    this.respawns = this.respawns.filter((Rp) => !Rp.done);
+    for (const G of this.grows) {                                  // soft grow-in (0.6 s) at the new spot
+      G.t += dt;
+      const it = this.R.items[G.i], c = it.center, u = Math.min(1, G.t / 0.6);
+      const s = psSm(0, 1, u) * (1 + 0.08 * Math.sin(Math.PI * u));
+      if (s >= 0.999 && u >= 1) { M.copy(it.matrix); G.done = true; }
+      else M.copy(T.makeTranslation(c.x, c.y, c.z)).multiply(S.makeScale(Math.max(s, 1e-4), Math.max(s, 1e-4), Math.max(s, 1e-4))).multiply(T.makeTranslation(-c.x, -c.y, -c.z)).multiply(it.matrix);
+      this.R.heads.setMatrixAt(G.i, M); this.R.greens.setMatrixAt(G.i, M);
+      this.R.heads.instanceMatrix.needsUpdate = true; this.R.greens.instanceMatrix.needsUpdate = true;
+    }
+    this.grows = this.grows.filter((G) => !G.done);
+    // snow particles
+    for (let j = 0; j < this.pN; j++) {
+      if (this.pLife[j] <= 0) { this.pAlpha.array[j] = 0; continue; }
+      this.pLife[j] -= dt;
+      const o = j * 3;
+      this.pVel[o + 1] -= 1.6 * dt;
+      const d = Math.exp(-1.8 * dt); this.pVel[o] *= d; this.pVel[o + 2] *= d;
+      for (let k = 0; k < 3; k++) this.pPos[o + k] += this.pVel[o + k] * dt;
+      const u = Math.max(0, this.pLife[j] / this.pMax[j]);
+      this.pAlpha.array[j] = 0.85 * u * Math.min(1, (1 - u) * 8);
+    }
+    this.points.geometry.attributes.position.needsUpdate = true;
+    this.pAlpha.needsUpdate = true;
+  }
+}
+
+// ---------------- the bouquet (same white clay style as the roses) ----------------
+// origin = where the hands hold it; local +y points from the hands toward the flowers
+function createBouquet(roseParts) {
+  const g = new THREE.Group();
+  g.name = 'RoseBouquet';
+  // plain white clay, no self-illumination: lit like the characters (their soft fill is added in ProposalSequence)
+  const white = new THREE.MeshStandardMaterial({ color: 0xf8f5ef, roughness: 0.8 });
+  const green = new THREE.MeshStandardMaterial({ color: 0x5f9469, roughness: 0.8 });
+  const paper = new THREE.MeshStandardMaterial({ color: 0xefe6dc, roughness: 0.9, side: THREE.DoubleSide });
+  const ribbon = new THREE.MeshStandardMaterial({ color: 0xeac9c4, roughness: 0.7 });
+  // seven small rose heads (the scenery rose's own head geometry, re-centred on its base)
+  const headGeo = roseParts.head.clone();
+  headGeo.translate(-roseParts.base.x, -roseParts.base.y, -roseParts.base.z);
+  const heads = new THREE.InstancedMesh(headGeo, white, 7);
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler();
+  for (let k = 0; k < 7; k++) {
+    const ring = k > 0, a = (k / 6) * Math.PI * 2;
+    e.set(ring ? 0.5 : 0, a + k, 0, 'YXZ');
+    const pos = ring ? new THREE.Vector3(Math.sin(a) * 0.1, 0.3, Math.cos(a) * 0.1) : new THREE.Vector3(0, 0.33, 0);
+    m.compose(pos, q.setFromEuler(new THREE.Euler(ring ? 0.5 * Math.cos(a) : 0, k * 1.3, ring ? -0.5 * Math.sin(a) : 0)), new THREE.Vector3(0.24, 0.24, 0.24));
+    heads.setMatrixAt(k, m);
+  }
+  g.add(heads);
+  // a few rounded leaves tucked between the flowers
+  // four small leaves, tucked in the gaps between the outer roses (inside the bouquet's silhouette)
+  const leafGeo = new THREE.SphereGeometry(1, 12, 8);
+  leafGeo.scale(0.024, 0.05, 0.009);
+  for (const deg of [30, 150, 210, 330]) {                           // outer roses sit at 60° steps → leaves in the gaps
+    const a = deg * Math.PI / 180, l = new THREE.Mesh(leafGeo, green);
+    l.position.set(Math.sin(a) * 0.105, 0.35, Math.cos(a) * 0.105);   // just above the paper rim, between the roses
+    l.rotation.set(0.8 * Math.cos(a), a, -0.8 * Math.sin(a), 'YXZ');
+    g.add(l);
+  }
+  // soft paper cone wrap + ribbon
+  const wrap = new THREE.Mesh(new THREE.LatheGeometry([
+    [0.02, 0.0], [0.035, 0.02], [0.06, 0.1], [0.11, 0.22], [0.155, 0.31], [0.16, 0.33], [0.15, 0.335],
+  ].map(([r, y]) => new THREE.Vector2(r, y)), 28), paper);
+  g.add(wrap);
+  const tie = new THREE.Mesh(new THREE.TorusGeometry(0.047, 0.016, 10, 24), ribbon);
+  tie.rotation.x = Math.PI / 2; tie.position.y = 0.085;
+  g.add(tie);
+  g.traverse((o) => { o.castShadow = false; });
+  return g;
+}
+
+// ---------------- the proposal (~10 s) ----------------
+class ProposalSequence {
+  constructor({ player, her, partner, camera, cine, renderer, scene, bounds, fills, roseParts, snow, onBusy }) {
+    Object.assign(this, { player, her, partner, camera, cine, renderer, scene, bounds, fills, snow, onBusy });
+    this.active = false;
+    this.done = false;
+    this.t = 0;
+    this.bouquet = createBouquet(roseParts);
+    this.bouquet.visible = false;
+    scene.add(this.bouquet);
+    // the bouquet gets the characters' own soft fill (natural shading, no glow); it dims / restores with theirs
+    this.fills = [...fills, addSoftFill(this.bouquet, LIGHTING.characterFill)];
+    // soft light without real lights: two gentle circular pools on the ice, one under each character's feet
+    const poolMat = new THREE.MeshBasicMaterial({
+      map: (() => {                                                  // flat, soft centre: no hot spot under the feet
+        // (the two pools overlap under the couple, so each one is dim in the middle and keeps its soft outer ring)
+        const cv = document.createElement('canvas'); cv.width = cv.height = 64;
+        const g = cv.getContext('2d'), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+        [[0, 0.1], [0.25, 0.15], [0.5, 0.35], [0.7, 0.35], [0.86, 0.15], [1, 0]].forEach(([o, a]) => gr.addColorStop(o, `rgba(255,232,205,${a})`));
+        g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
+        return new THREE.CanvasTexture(cv);
+      })(), transparent: true, depthWrite: false,
+      blending: THREE.AdditiveBlending, opacity: 0,
+    });
+    poolMat.color.setScalar(1.2);                                    // pools a little brighter than before (×1.2)
+    this.poolMat = poolMat;
+    this.spots = [0, 1].map(() => {
+      const pool = new THREE.Mesh(new THREE.CircleGeometry(1.2, 48), poolMat);
+      pool.rotation.x = -Math.PI / 2;
+      pool.visible = false; pool.renderOrder = 3; pool.layers.set(EXTERIOR_LAYER);
+      scene.add(pool);
+      return { pool };
+    });
+    // one gentle, faint cone of light from above onto the two of them (soft edges, fades out toward the top and
+    // just above the ice; additive, no real light so nothing else in the scene changes)
+    const coneH = 5.6;
+    const coneGeo = new THREE.CylinderGeometry(0.1, 1.45, coneH, 48, 1, true);
+    coneGeo.translate(0, coneH / 2, 0);
+    this.coneMat = new THREE.ShaderMaterial({
+      uniforms: { uColor: { value: new THREE.Color(1.0, 0.9, 0.78) }, uOpacity: { value: 0 }, uH: { value: coneH } },
+      vertexShader: `uniform float uH; varying float vH; varying vec3 vN; varying vec3 vV;
+        void main() {
+          vH = position.y / uH;
+          vec4 mv = modelViewMatrix * vec4(position, 1.0);
+          vN = normalize(normalMatrix * normal); vV = normalize(-mv.xyz);
+          gl_Position = projectionMatrix * mv;
+        }`,
+      fragmentShader: `uniform vec3 uColor; uniform float uOpacity; varying float vH; varying vec3 vN; varying vec3 vV;
+        void main() {
+          float edge = pow(abs(dot(normalize(vN), normalize(vV))), 2.0);           // soft sides, no hard outline
+          float h = smoothstep(0.0, 0.35, vH) * (1.0 - smoothstep(0.55, 1.0, vH)); // fades at the ice and toward the top
+          gl_FragColor = vec4(uColor * uOpacity * edge * h, 1.0);
+        }`,
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+    });
+    this.cone = new THREE.Mesh(coneGeo, this.coneMat);
+    this.cone.visible = false; this.cone.renderOrder = 4; this.cone.layers.set(EXTERIOR_LAYER);
+    scene.add(this.cone);
+  }
+  // ---- timeline (seconds) ----
+  // OFFER0 → OFFER1: his right hand brings the bouquet from behind his back around his right side (2.3 s)
+  static T = { SNAP: 0.7, LIT: 1.8, HIDE0: 1.8, HIDE1: 2.5, APPEAR: 2.6, KNEEL0: 3.4, KNEEL1: 4.6, OFFER0: 4.7, OFFER1: 7.0,
+    REACH0: 6.9, REACH1: 7.7, SWAP: 7.8, CHEST1: 8.6, RISE0: 8.6, RISE1: 9.6, CLOSE0: 9.5, CLOSE1: 10.7, END: 11.5, OUT: 12.3 };
+  // (CLOSE0 → CLOSE1: they step a little closer and hold hands — his right hand in her left)
+
+  start() {
+    const P = this.player;
+    if (this.active || (this.done && !this.allowReplay) || P.trick || P.spin || this.partner.mode === 'dance') return false;
+    this.active = true;
+    this.t = 0;
+    this.snapped = false;
+    this.swap = null;
+    // save everything we temporarily take over
+    this.saved = {
+      exposure: this.renderer.toneMappingExposure,
+      fills: this.fills.map((u) => u.value.clone()),
+    };
+    this.onBusy(true);                                               // (camera rotate / zoom stay available)                                               // Triple Axel / Spin buttons rest
+    this.partner.cancel();
+    this.partner.closeMenu();
+    const H = this.partner.H;
+    H.active = false; H.locked = false; H.vel.set(0, 0, 0);
+    P.target = null; P.glideOut = false; P.velocity.set(0, 0, 0);
+    return true;
+  }
+
+  // stage: she stays (pulled a little inward if needed), he stands 1.0 m in front of her, facing each other
+  _stage() {
+    const b = this.bounds, her = this.her.root.position, me = this.player.mesh.position;
+    const keep = (p) => {                                            // ≥ 3 m inside the boards, clear of the tree island
+      const out = b.dist(p.x, p.z) + 3;
+      if (out > 0) { const n = b.normal(p.x, p.z); p.x -= n.x * out; p.z -= n.z * out; }
+      const r = Math.hypot(p.x, p.z), m = b.islandRadius + 3.2;
+      if (r < m) { const k = m / Math.max(r, 1e-3); p.x *= k; p.z *= k; }
+      return p;
+    };
+    const S = keep(new THREE.Vector3(her.x, b.iceY, her.z));
+    let d = new THREE.Vector3(me.x - S.x, 0, me.z - S.z);
+    if (d.lengthSq() < 1e-4) d.set(Math.sin(this.her.root.rotation.y), 0, Math.cos(this.her.root.rotation.y));
+    d.normalize();
+    let Hm = keep(S.clone().addScaledVector(d, 1.0));
+    if (Hm.distanceTo(S) < 0.9) { d.set(-d.z, 0, d.x); Hm = keep(S.clone().addScaledVector(d, 1.0)); }
+    d = Hm.clone().sub(S).setY(0).normalize();
+    this.mid = S.clone().add(Hm).multiplyScalar(0.5);
+    this.keepT = undefined;                                          // (bouquet keep-timer starts after the sequence)
+    this.u = d;                                                      // her → him
+    this.D0 = 1.0;
+    this.hHim = Math.atan2(-d.x, -d.z);                              // he faces her
+    this.hHer = Math.atan2(d.x, d.z);                                // she faces him
+    // camera on the side with more room on the ice
+    const side = new THREE.Vector3(-d.z, 0, d.x);
+    const test = (sg) => b.dist(this.mid.x + side.x * 3 * sg, this.mid.z + side.z * 3 * sg);
+    this.camSide = side.multiplyScalar(test(1) < test(-1) ? 1 : -1);
+    // one-time framing (while the screen is black): turn the follow camera to a side view of the two. After this the
+    // camera is entirely the user's: drag / pinch / wheel work as usual and nothing pulls the view back.
+    this.cine.yaw = Math.atan2(-this.camSide.x, -this.camSide.z) - this.cine.orbitYaw;
+  }
+
+  // pose helpers -----------------------------------------------------------
+  _stand(R) {
+    return { hL: [-0.08, 0, 0.04], kL: 0.14, aL: [-0.06, 0, -0.024], hR: [-0.08, 0, -0.04], kR: 0.14, aR: [-0.06, 0, 0.024],
+      tor: [0.02, 0, 0], nk: [-0.014, 0, 0], hd: [0, 0, 0], sL: [0.05, 0, 0.2], eL: -0.3, sR: [0.05, 0, -0.2], eR: -0.3 };
+  }
+  _mix(a, b, w) {
+    if (w <= 0) return a;
+    const o = {};
+    for (const k in a) o[k] = Array.isArray(a[k]) ? a[k].map((v, i) => lerp(v, b[k][i], w)) : lerp(a[k], b[k], w);
+    return o;
+  }
+  _apply(R, P) {
+    const L = R.L;
+    R.body.rotation.set(0, 0, 0);
+    R.pelvis.rotation.set(0, 0, 0);
+    R.legL.hip.rotation.set(...P.hL); R.legL.knee.rotation.set(P.kL, 0, 0); R.legL.ankle.rotation.set(...P.aL);
+    R.legR.hip.rotation.set(...P.hR); R.legR.knee.rotation.set(P.kR, 0, 0); R.legR.ankle.rotation.set(...P.aR);
+    R.torso.rotation.set(...P.tor); R.torso.scale.setScalar(1);
+    R.neck.rotation.set(...P.nk); R.head.rotation.set(...P.hd);
+    R.armL.shoulder.rotation.set(...P.sL); R.armL.elbow.rotation.set(P.eL, 0, 0);
+    R.armR.shoulder.rotation.set(...P.sR); R.armR.elbow.rotation.set(P.eR, 0, 0);
+    const ext = (h, k) => (L.thigh * Math.cos(h[0]) + L.shin * Math.cos(h[0] + k)) * Math.cos(h[2]) + L.foot;
+    R.pelvis.position.set(0, Math.max(ext(P.hL, P.kL), ext(P.hR, P.kR)), 0);    // lowest blade (or the knee) on the ice
+  }
+  _frame(h) {                                                       // forward / left vectors for a heading
+    return { f: new THREE.Vector3(Math.sin(h), 0, Math.cos(h)), l: new THREE.Vector3(Math.cos(h), 0, -Math.sin(h)) };
+  }
+
+  // fixed-step update (called instead of the normal player / partner updates while active)
+  step(dt) {
+    const T = ProposalSequence.T, P = this.player, M = P.rig, R = this.her;
+    this.t += dt;
+    const t = this.t, sm = psSm;
+    if (t < T.SNAP) { this._lighting(t); return; }                   // fading to black: everyone holds still
+    if (!this.snapped) {
+      this.snapped = true;
+      this._stage();
+    }
+    // ---- base body poses ----
+    const STAND = this._stand();
+    const KNEEL = { ...STAND, hL: [-1.5, 0, 0.06], kL: 1.5, aL: [0, 0, 0], hR: [0.1, 0, -0.03], kR: 1.47, aR: [-0.47, 0, 0],
+      tor: [0.06, 0, 0], nk: [-0.12, 0, 0], hd: [-0.06, 0, 0] };
+    const SHY = { ...STAND, tor: [0.05, 0, 0], nk: [0.02, 0, 0], hd: [0, 0, 0.07] };
+    const HER_REACH = { ...STAND, tor: [0.24, 0, 0], nk: [-0.02, 0, 0], hd: [0.08, 0, 0] };
+    const HER_LOOK_DOWN = { ...STAND, tor: [0.04, 0, 0], nk: [0.16, 0, 0] };
+    const wShy = sm(T.HIDE0, T.HIDE1, t) * (1 - sm(T.KNEEL0, T.KNEEL0 + 0.5, t));
+    const wKneel = sm(T.KNEEL0, T.KNEEL1, t) * (1 - sm(T.RISE0, T.RISE1, t));
+    const wHold = sm(T.CLOSE0, T.CLOSE1, t);                         // reach out and hold hands
+    const wReach = sm(T.REACH0 - 0.2, T.REACH1, t) * (1 - sm(T.SWAP + 0.1, T.CHEST1, t));
+    const wDown = sm(T.KNEEL0, T.KNEEL1, t) * (1 - sm(T.RISE0, T.RISE1, t));
+    const pm = this._mix(this._mix(STAND, SHY, wShy), KNEEL, wKneel);
+    const ph = this._mix(this._mix(STAND, HER_LOOK_DOWN, wDown * (1 - wReach)), HER_REACH, wReach);
+    this._apply(M, pm);
+    this._apply(R, ph);
+    // ---- roots: facing each other along the stage line, a small step closer to hold hands ----
+    const d = lerp(this.D0, 0.86, wHold);
+    const himPos = this.mid.clone().addScaledVector(this.u, d / 2), herPos = this.mid.clone().addScaledVector(this.u, -d / 2);
+    P.mesh.position.copy(himPos); P.heading = this.hHim; P.mesh.rotation.y = this.hHim;
+    R.root.position.copy(herPos); R.root.rotation.y = this.hHer;
+    P.mesh.updateMatrixWorld(true); R.root.updateMatrixWorld(true);
+    const fm = this._frame(this.hHim), fh = this._frame(this.hHer), up = new THREE.Vector3(0, 1, 0);
+    const wp = (o) => o.getWorldPosition(new THREE.Vector3());
+    // ---- his arms: both hands behind his back; then his RIGHT hand alone brings the bouquet forward along a curved
+    // path out around his right side (never across the chest / belly), elbow out and down; the left hand stays
+    // behind his back until the hand-over ----
+    const wHide = sm(T.HIDE0, T.HIDE1, t) * (1 - sm(T.SWAP, T.SWAP + 0.6, t));
+    const rv = sm(T.OFFER0, T.OFFER1, t);                              // reveal progress 0 → 1
+    const pel = wp(M.pelvis), chest = wp(M.torso).addScaledVector(up, 0.22);
+    const at = (o, f, l, u) => o.clone().addScaledVector(fm.f, f).addScaledVector(fm.l, l).addScaledVector(up, u);
+    // hand-hold: his right hand ↔ her left hand, one shared clasp point low between them (same helper as Hold Hands)
+    let clasp = null;
+    if (wHold > 0) {
+      const Sm = psShoulder(M.armR), Sf = psShoulder(R.armL);
+      const P0 = Sm.clone().add(Sf).multiplyScalar(0.5); P0.y -= 0.3;
+      clasp = psClasp(P0, Sm, psReach(M), Sf, psReach(R));            // [his palm, her palm]
+    }
+    if (wHide > 0) {
+      // left hand: stays behind the back (elbow out and back)
+      psArmIK(M, M.armL, 1, at(pel, -0.24, 0.045, 0.14), wHide, new THREE.Vector3(0.9, -0.4, -0.7));
+      // right hand: behind the back → out to the right of the hip → forward at the side → offered at chest height
+      const path = new THREE.CatmullRomCurve3([
+        at(pel, -0.24, -0.045, 0.14), at(pel, -0.22, -0.25, 0.13), at(pel, -0.04, -0.4, 0.18),
+        at(pel, 0.24, -0.36, 0.3), at(chest, 0.44, -0.045, -0.06),
+      ], false, 'centripetal');
+      const k = rv < 0.5 ? psSm(0, 0.5, rv) : psSm(0.5, 1, rv);      // elbow: back → out to the side → down
+      const pole = rv < 0.5 ? new THREE.Vector3(-0.9, -0.4, -0.7).lerp(new THREE.Vector3(-1, -0.55, -0.15), k)
+        : new THREE.Vector3(-1, -0.55, -0.15).lerp(new THREE.Vector3(-0.55, -1, -0.35), k);
+      psArmIK(M, M.armR, -1, path.getPoint(rv), wHide, pole);
+    }
+    if (clasp) psArmIK(M, M.armR, -1, clasp[0], wHold, PS_POLE_IN);   // his right hand reaches for hers
+    M.torso.updateWorldMatrix(true, true);
+    // ---- bouquet: appears in his hands behind his back, offered, handed over, held by her ----
+    const B = this.bouquet;
+    const appear = sm(T.APPEAR, T.APPEAR + 0.25, t);
+    B.visible = appear > 0;                                          // stays with her after the sequence (see afterStep)
+    const sc = appear * (1 + 0.15 * Math.sin(Math.PI * Math.min(1, (t - T.APPEAR) / 0.25)));
+    B.scale.setScalar(Math.max(1e-3, sc));
+    const midPalms = (Rg) => psPalm(Rg, Rg.armL).add(psPalm(Rg, Rg.armR)).multiplyScalar(0.5);
+    const axBehind = up.clone().multiplyScalar(0.75).addScaledVector(fm.f, -0.65).normalize();
+    const axOffer = up.clone().multiplyScalar(0.5).addScaledVector(fm.f, 0.86).normalize();
+    const axSide = up.clone().multiplyScalar(0.8).addScaledVector(fm.l, -0.5).addScaledVector(fm.f, 0.1).normalize();   // leaning outward
+    const axChest = up.clone().multiplyScalar(0.85).addScaledVector(fh.f, 0.4).normalize();
+    let axis, grip;
+    if (t < T.SWAP) {
+      axis = (rv < 0.5 ? axBehind.clone().lerp(axSide, psSm(0, 0.5, rv)) : axSide.clone().lerp(axOffer, psSm(0.5, 1, rv))).normalize();
+      grip = psPalm(M, M.armR);                                      // held in his right hand
+    }
+    // ---- her arms (computed after his so she can reach for the bouquet he holds) ----
+    const herChest = wp(R.torso).addScaledVector(up, 0.16);
+    const herPel = wp(R.pelvis);
+    const wClasp = 1 - sm(T.REACH0 - 0.3, T.REACH0 + 0.2, t);
+    for (const [arm, side] of [[R.armL, 1], [R.armR, -1]]) {
+      if (wClasp > 0) {  // hands softly together in front, low
+        psArmIK(R, arm, side, herPel.clone().addScaledVector(fh.f, 0.2).addScaledVector(up, 0.02).addScaledVector(fh.l, side * 0.045), wClasp * 0.85);
+      }
+    }
+    if (t < T.SWAP) {
+      if (wReach > 0 && grip) {   // she reaches for the wrap, a little above his hands
+        const hold = grip.clone().addScaledVector(axis, 0.11);
+        for (const [arm, side] of [[R.armL, 1], [R.armR, -1]]) psArmIK(R, arm, side, hold.clone().addScaledVector(fh.l, side * 0.05), wReach);
+      }
+    } else {
+      if (!this.swap) {             // hand-over: from now on the bouquet follows her hands
+        this.swap = { from: (grip || B.position.clone()).clone().addScaledVector(axOffer, 0.11) };
+      }
+      const toChest = sm(T.SWAP, T.CHEST1, t);
+      const chestPt = herChest.clone().addScaledVector(fh.f, 0.27).addScaledVector(up, -0.04);
+      const hold = this.swap.from.clone().lerp(chestPt, toChest);
+      // both hands bring it to her chest; from CLOSE0 her right hand keeps it there alone and her left hand
+      // reaches out to hold his hand
+      psArmIK(R, R.armR, -1, hold.clone().addScaledVector(fh.l, -0.05), 1);
+      psArmIK(R, R.armL, 1, hold.clone().addScaledVector(fh.l, 0.05), 1);
+      if (clasp) psArmIK(R, R.armL, 1, clasp[1], wHold, PS_POLE_IN);
+      R.torso.updateWorldMatrix(true, true);
+      const herMid = midPalms(R), herRight = psPalm(R, R.armR);
+      grip = herMid.lerp(herRight, wHold).addScaledVector(up, -0.02);
+      axis = axOffer.clone().lerp(axChest, toChest).normalize();
+      // keep the swap seamless: the first frames of her grip start exactly where his hands left it
+      const k = 1 - sm(T.SWAP, T.SWAP + 0.25, t);
+      if (k > 0 && this.swap.from) grip.lerp(this.swap.from.clone().addScaledVector(axOffer, -0.11), k);
+    }
+    if (grip) {
+      B.position.copy(grip).addScaledVector(axis, -0.04);
+      B.quaternion.setFromUnitVectors(up, axis);
+    }
+    // ---- lighting: almost-dark rink, warm soft "spotlights" on the two of them ----
+    this._lighting(t);
+    if (t >= T.OUT) this._finish();
+  }
+
+  _lighting(t) {
+    const T = ProposalSequence.T, sm = psSm, e0 = this.saved.exposure, eStage = 0.12;   // stage exposure: rink very dark
+    let e;
+    if (t < T.SNAP) e = lerp(e0, 0.03, sm(0, T.SNAP, t));
+    else if (t < T.END) e = lerp(0.03, eStage, sm(T.SNAP, T.LIT, t));
+    else e = lerp(eStage, e0, sm(T.END, T.OUT, t));
+    this.renderer.toneMappingExposure = e;
+    // the characters keep roughly their normal look (their own soft fill makes up for the darker exposure)
+    const w = t < T.SNAP ? 0 : sm(T.SNAP, T.LIT, t) * (1 - sm(T.END, T.OUT, t));
+    const soft = new THREE.Color(1.0, 0.9, 0.78).multiplyScalar(1.05);   // spotlight on the characters
+    this.fills.forEach((u, i) => u.value.copy(this.saved.fills[i]).lerp(soft, w));
+    this.poolMat.opacity = 0.7 * w;
+    this.coneMat.uniforms.uOpacity.value = 0.14 * w;            // soft, restrained
+    if (this.snow) this.snow.setProposal(w, this.snapped ? this.mid : null);   // gentle snow through the light
+    if (this.snapped) {
+      this.cone.visible = w > 0.001;
+      this.cone.position.set(this.mid.x, this.bounds.iceY, this.mid.z);
+      [this.player.mesh.position, this.her.root.position].forEach((p, i) => {
+        const S = this.spots[i];
+        S.pool.visible = w > 0.001;
+        S.pool.position.set(p.x, this.bounds.iceY + 0.015, p.z);
+      });
+    }
+  }
+
+  // camera: the normal follow camera, aimed at the couple while the sequence runs (the user can rotate / zoom freely)
+  get cameraTarget() { return this.active && this.snapped ? this.mid : null; }
+
+  _finish() {
+    const P = this.player, R = this.her, H = this.partner.H, S = this.saved;
+    // lighting, camera input and buttons exactly as before
+    this.renderer.toneMappingExposure = S.exposure;
+    this.fills.forEach((u, i) => u.value.copy(S.fills[i]));
+    for (const s of this.spots) s.pool.visible = false;
+    this.cone.visible = false;
+    if (this.snow) this.snow.setProposal(0);
+    this.keepT = 0;                    // the bouquet stays in her right hand for 60 s from now (see afterStep)
+    // characters go back to their normal animation control where they stand
+    P.velocity.set(0, 0, 0); P.target = null; P.glideOut = false;
+    P.mesh.position.y = this.bounds.iceY;
+    this.finalSnaps = { him: psSnap(P.rig), her: psSnap(R) };
+    H.heading = R.root.rotation.y; H.vel.set(0, 0, 0); H.active = false; H.locked = false; H.wJoin = 0; H.wRel = 0; H.idleT = -1;
+    this.active = false;
+    this.done = true;
+    this.relax = 0;                    // short blend from the final pose into the normal poses (in afterStep)
+    this.onBusy(false);
+  }
+  // runs every fixed step after the normal updates: eases both rigs back for 0.8 s after the sequence, and keeps the
+  // bouquet in her right hand for 60 s (then it shrinks away)
+  afterStep(dt) {
+    if (this.relax !== undefined && this.relax < 0.8) {
+      this.relax += dt;
+      const w = 1 - psSm(0, 0.8, this.relax);
+      psBlendTo(this.player.rig, this.finalSnaps.him, w);            // his normal animation already ran this step
+      psBlendTo(this.her, this.finalSnaps.her, 1);                   // her: final pose → her own standing pose
+      psBlendTo(this.her, this.partner.idleSnap, 1 - w);
+    }
+    if (this.keepT === undefined || this.keepT > 60.6) return;
+    this.keepT += dt;
+    const R = this.her, B = this.bouquet, up = new THREE.Vector3(0, 1, 0);
+    const h = R.root.rotation.y, f = new THREE.Vector3(Math.sin(h), 0, Math.cos(h)), l = new THREE.Vector3(Math.cos(h), 0, -Math.sin(h));
+    R.root.updateMatrixWorld(true);
+    if (!this.partner.H.active) {      // standing on her own: right hand keeps cradling the bouquet at her chest
+      const chestPt = R.torso.getWorldPosition(new THREE.Vector3()).addScaledVector(up, 0.12).addScaledVector(f, 0.27).addScaledVector(l, -0.05);
+      psArmIK(R, R.armR, -1, chestPt, 1);
+      R.torso.updateWorldMatrix(true, true);
+    }                                  // (skating with him: her arms follow the partner animation and the bouquet follows her hand)
+    const axis = up.clone().multiplyScalar(0.85).addScaledVector(f, 0.4).normalize();
+    B.position.copy(psPalm(R, R.armR)).addScaledVector(up, -0.02).addScaledVector(axis, -0.04);
+    B.quaternion.setFromUnitVectors(up, axis);
+    const fade = psSm(60, 60.6, this.keepT);
+    B.scale.setScalar(Math.max(1e-3, 1 - fade));
+    if (this.keepT > 60.6) B.visible = false;
+  }
+}
+
 // ===== main.js =====
 
 
@@ -3871,7 +4562,7 @@ console.info('[WinterRink]', world.stats);
 
 // ---- character (stand-in; keep your own in the real project) ---------------
 const player = new PlaceholderPlayer(scene, world.bounds);
-addSoftFill(player.mesh, LIGHTING.characterFill);
+const playerFill = addSoftFill(player.mesh, LIGHTING.characterFill);
 
 // ---- second character (2026-11-02): an independent copy of the skater (own rig and bones) that just stands ----
 // Same model and art style; only her outfit, hair and earmuffs differ (buildSkater style 'girl'). No animation,
@@ -3892,7 +4583,7 @@ const skater2 = (() => {
   R.root.rotation.y = Math.atan2(0 - 2.6, world.bounds.rz * 0.7 - 19.6);   // faces the player's start position
   R.root.name = 'Skater2';
   scene.add(R.root);
-  addSoftFill(R.root, LIGHTING.characterFill);                             // same character lighting as the player
+  R.softFill = addSoftFill(R.root, LIGHTING.characterFill);                // same character lighting as the player
   return R;
 })();
 const cine = new FollowCamera(camera);
@@ -3909,6 +4600,65 @@ const partner = new PartnerSkating({
   onBusy: (b) => setActionBusy(b),
 });
 controls.onTap = (ray) => partner.handleTap(ray);
+
+// ---- white rose collection + Ask Out proposal (2026-11-03) ---------------------------------------------
+STORY_UI.mount();
+const pillStyle = partner.menu.firstChild.style.cssText;
+const roseCollector = new RoseCollector({
+  roses: world.roses, scene, camera, dom: renderer.domElement, pillStyle,
+  onCollect: (n, total) => {
+    STORY_UI.setCount(n, total);
+    if (n === total) STORY_UI.toast(`${total}/${total} White Roses — Ask Out Unlocked!`, 5);   // once, when it unlocks
+    else STORY_UI.toast(`White Roses ${n}/${total}`, 3);
+    updateAskOut();
+  },
+});
+roseCollector.setViewportHeight(renderer.getDrawingBufferSize(new THREE.Vector2()).y);
+STORY_UI.setCount(0, roseCollector.total);
+const proposal = new ProposalSequence({
+  player, her: skater2, partner, camera, cine, renderer, scene, bounds: world.bounds,
+  fills: [playerFill, skater2.softFill], roseParts: world.roses.parts, snow: world.snow,
+  onBusy: (b) => { setActionBusy(b); if (!b) updateAskOut(); },      // (button looks available again after a replayable run)
+});
+// TEMPORARY (testing): Ask Out is always available and can be replayed. Set to false to restore the
+// original rule (unlocks after all 10 roses, plays once). Rose collection / counter are unaffected.
+const ASK_OUT_TEST_UNLOCK = true;
+proposal.allowReplay = ASK_OUT_TEST_UNLOCK;
+// "Ask Out" joins her menu (Help · Hold Hands · Dance · Ask Out); locked until all roses are collected
+const askBtn = document.createElement('button');
+askBtn.textContent = 'Ask Out';
+askBtn.style.cssText = pillStyle;
+partner.menu.style.flexWrap = 'wrap';
+partner.menu.style.justifyContent = 'center';
+partner.menu.style.width = 'max-content';
+partner.menu.style.maxWidth = '92vw';
+function updateAskOut() {
+  const open = ASK_OUT_TEST_UNLOCK ? !proposal.active
+    : roseCollector.count >= roseCollector.total && !proposal.done && !proposal.active;
+  askBtn.style.opacity = open ? '1' : '0.45';
+  askBtn.setAttribute('aria-disabled', open ? 'false' : 'true');
+}
+askBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
+askBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  askBtn.blur();
+  if (proposal.active) return;
+  if (!ASK_OUT_TEST_UNLOCK && proposal.done) { STORY_UI.toast('Ask Out has already been played.', 3); return; }
+  if (!ASK_OUT_TEST_UNLOCK && roseCollector.count < roseCollector.total) { STORY_UI.toast('Collect all 10 white roses to unlock Ask Out.', 3); return; }
+  if (player.trick || player.spin || partner.mode === 'dance') return;
+  partner.closeMenu();
+  roseCollector.close();
+  if (proposal.start()) updateAskOut();
+});
+partner.menu.appendChild(askBtn);
+updateAskOut();
+// taps: proposal (blocks everything) → open menus close → roses → her menu
+controls.onTap = (ray) => {
+  if (proposal.active) return true;
+  if (partner.menuOpen || partner.mode === 'dance') return partner.handleTap(ray);
+  if (roseCollector.handleTap(ray)) return true;
+  return partner.handleTap(ray);
+};
 
 // ---- temporary Triple Axel button --------------------------------------------
 const axelBtn = document.createElement('button');
@@ -3966,6 +4716,7 @@ function onResize() {
   world.setSize(b.x, b.y, renderer.getPixelRatio());
   if (typeof skateFx !== 'undefined') skateFx.setViewportHeight(b.y);
   if (typeof skateFx2 !== 'undefined') skateFx2.setViewportHeight(b.y);
+  if (typeof roseCollector !== 'undefined') roseCollector.setViewportHeight(b.y);
 }
 window.addEventListener('resize', onResize);
 
@@ -3984,14 +4735,20 @@ function simulate(frameDt, t) {
   simAcc += Math.min(frameDt, MAX_CATCH_UP);
   let dt = 0;
   while (simAcc >= SIM_STEP) {
-    if (!partner.preUpdate(SIM_STEP)) player.update(SIM_STEP);   // the dance drives the player itself; otherwise normal control
-    partner.postUpdate(SIM_STEP);
+    if (proposal.active) proposal.step(SIM_STEP);                 // the proposal drives both characters while it runs
+    else {
+      if (!partner.preUpdate(SIM_STEP)) player.update(SIM_STEP);   // the dance drives the player itself; otherwise normal control
+      partner.postUpdate(SIM_STEP);
+      proposal.afterStep(SIM_STEP);                               // (eases both rigs back for 0.8 s after the proposal)
+    }
     simAcc -= SIM_STEP;
     dt += SIM_STEP;
   }
   if (dt > 0) {
-    cine.update(dt, player.position, player.heading);
+    if (proposal.cameraTarget) cine.update(dt, proposal.cameraTarget, cine.yaw);   // free camera, aimed at the couple
+    else cine.update(dt, player.position, player.heading);
     controls.update(dt);
+    roseCollector.update(dt);
     skateFx.update(dt);
     skateFx2.update(dt);
   }
