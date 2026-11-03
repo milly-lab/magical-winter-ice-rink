@@ -33,7 +33,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
-import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import { mergeGeometries, mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 
 // ===== world/config.js =====
 // Magical Winter Forest Ice Rink — layout & look constants.
@@ -852,6 +852,99 @@ function createSnowflakeGeometry(variant = 0) {
   return g;
 }
 
+// Small white clay rose (2026-11-03 v2; stem 1.5× longer and thicker in v3). Base model ≈ 0.86 m tall; instances 0.75–0.87.
+//  - head: concentric petal layers, OUTERMOST = largest, widest and tallest, opening gently outward; each layer
+//    toward the centre is smaller and lower and curls inward; the centre (a small bud) sits clearly below the rim
+//  - stem: one smooth, gently curved tube (CatmullRom curve), slender
+//  - leaves: three thin, flat, tapered ovals with a slightly pointed tip, bent along their length, growing from the stem
+// Returns { head, green } geometries (position + normal, indexed) for two shared InstancedMeshes.
+function createRoseGeometry() {
+  // thick clay petal: ellipsoid (w × h × t) bent into a cup; base at y = 0, faces +z. curl > 0 rolls the top edge
+  // outward (open outer petals), curl < 0 rolls it inward (closed inner petals)
+  const petal = (w, h, t, cup, curl = 0) => {
+    let g = new THREE.SphereGeometry(1, 12, 9);
+    g.deleteAttribute('uv'); g.deleteAttribute('normal');
+    g = mergeVertices(g);
+    const pos = g.attributes.position;
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i) * w, y = (pos.getY(i) + 1) * h * 0.5, z = pos.getZ(i) * t;
+      const v = y / h;
+      pos.setXYZ(i, x, y, z - cup * x * x / w + curl * Math.max(0, v - 0.55) ** 2 * h);
+    }
+    g.computeVertexNormals();
+    return g;
+  };
+  // thin flat leaf: tapered oval, slightly pointed tip, bent down along its length and gently cupped across
+  const leafGeo = (L, W, bend, cupX) => {
+    const nu = 12, nv = 6, pos = [], idx = [];
+    for (let i = 0; i <= nu; i++) {
+      const u = i / nu, half = W * 0.5 * Math.pow(Math.sin(Math.PI * Math.min(u * 1.08, 1)), 0.75) * (1 - 0.25 * u);
+      for (let j = 0; j <= nv; j++) {
+        const v = (j / nv) * 2 - 1, x = v * half;
+        pos.push(x, u * L * 0.92, bend * u * u * L - cupX * (v * v) * half);   // (after laying it out: tip droops, edges lift)
+      }
+    }
+    for (let i = 0; i < nu; i++) for (let j = 0; j < nv; j++) {
+      const a = i * (nv + 1) + j, b = a + nv + 1;
+      idx.push(a, b, a + 1, a + 1, b, b + 1);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.setIndex(idx);
+    g.computeVertexNormals();
+    return g;
+  };
+  // gently curved stem; its top is where the head sits. 2026-11-03: the same curve shape scaled 1.5× from the
+  // ground (so 1.5× longer: 0.43 → 0.645 m above the snow, 0.18 m sunk in), and 1.5× thicker (below)
+  const STEM_SCALE = 1.5;
+  const stemCurve = new THREE.CatmullRomCurve3([
+    [0, -0.12, 0], [0.018, 0.08, 0.008], [0.045, 0.22, -0.006], [0.05, 0.33, -0.012], [0.035, 0.43, 0],
+  ].map(([x, y, z]) => new THREE.Vector3(x, y, z).multiplyScalar(STEM_SCALE)));
+  const top = stemCurve.getPoint(1);
+  const Y0 = top.y - 0.03;                                               // head base sits on the stem top (0.615)
+  const head = [];
+  const place = (g, ring, angle, tilt, y) => {                            // onto the flower (around the stem top)
+    g.rotateX(tilt);                                                      // + = lean outward, − = lean inward
+    g.translate(0, 0, ring);
+    g.rotateY(angle);
+    g.translate(top.x, y, top.z);
+    head.push(g);
+  };
+  // layers from the OUTSIDE in: each one smaller, lower at the top, and closing more (negative tilt = curls in)
+  //               petals  ring    w      h      t      tilt   base y  cup   curl
+  const layers = [[6, 0.125, 0.16, 0.3, 0.055, 0.6, 0.0, 0.42, 0.5],       // outer rim: largest, widest, tallest (top ≈ 0.65)
+    [5, 0.09, 0.125, 0.2, 0.05, 0.4, 0.02, 0.5, 0.15],                     // top ≈ 0.60
+    [4, 0.055, 0.095, 0.15, 0.045, -0.05, 0.03, 0.6, -0.2],                // top ≈ 0.58
+    [3, 0.025, 0.07, 0.1, 0.04, -0.3, 0.045, 0.7, -0.3]];                   // innermost: smallest, lowest, curled in (≈ 0.54)
+  layers.forEach(([n, ring, w, h, t, tilt, y, cup, curl], li) => {
+    for (let k = 0; k < n; k++) place(petal(w, h, t, cup, curl), ring, (k / n) * Math.PI * 2 + li * 0.62, tilt, Y0 + y);
+  });
+  let bud = new THREE.SphereGeometry(0.04, 12, 9); bud.deleteAttribute('uv'); bud = mergeVertices(bud);   // tiny closed centre
+  bud.scale(1, 1.1, 1); bud.translate(top.x, Y0 + 0.08, top.z); bud.computeVertexNormals();
+  head.push(bud);
+  let base = new THREE.SphereGeometry(0.12, 18, 12); base.deleteAttribute('uv'); base = mergeVertices(base);  // fills the cup, stays low
+  base.scale(1, 0.55, 1); base.translate(top.x, Y0 + 0.06, top.z); base.computeVertexNormals();
+  head.push(base);
+  // green parts
+  const green = [];
+  const stem = new THREE.TubeGeometry(stemCurve, 28, 0.036, 10, false);   // radius 0.024 → 0.036 (1.5× thicker)
+  stem.deleteAttribute('uv');
+  green.push(stem);
+  let calyx = new THREE.SphereGeometry(0.072, 14, 10); calyx.deleteAttribute('uv'); calyx = mergeVertices(calyx);   // a touch wider than the thicker stem
+  calyx.scale(1, 0.7, 1); calyx.translate(top.x, Y0 + 0.02, top.z); calyx.computeVertexNormals();
+  green.push(calyx);
+  // [height on the stem (0…1), direction around the stem, length, width, tilt up from horizontal, bend, cup]
+  for (const [t, angle, L, W, tilt, bend, cupX] of [[0.3, 0.5, 0.52, 0.22, 0.5, 0.32, 0.12], [0.5, 2.75, 0.45, 0.2, 0.55, 0.28, 0.14], [0.66, 4.6, 0.38, 0.17, 0.4, 0.3, 0.1]]) {
+    const leaf = leafGeo(L, W, bend, cupX);
+    leaf.rotateX(Math.PI / 2 - tilt);                                    // lay it out from the stem, tip angled up
+    leaf.rotateY(angle);
+    const p = stemCurve.getPoint(t);
+    leaf.translate(p.x, p.y, p.z);
+    green.push(leaf);
+  }
+  return { head: mergeGeometries(head), green: mergeGeometries(green) };
+}
+
 // soft radial blob texture for fake shadows (dark navy) and light spill (warm)
 function extRadialTexture(inner, outer) {
   const cv = document.createElement('canvas');
@@ -1191,6 +1284,42 @@ function createWinterScenery({ glow, renderer }) {
       im.computeBoundingSphere();
       group.add(im);
     }
+  }
+
+  // ---- small white clay roses near the boards (2026-11-03, v2: exactly 10, ~half the previous size) ----
+  // ROSES: [direction from the rink centre (rad), metres outside the boards, scale] — edit this list to move,
+  // add or remove roses. Fixed list + own seeded random stream (yaw / lean / tiny jitter only if a spot is
+  // taken), so the arrangement is the same on every load and nothing else in the layout moves.
+  const ROSES = [
+    [-2.82, 8.6, 0.78], [-2.07, 7.2, 0.86], [-1.31, 9.4, 0.8], [-0.74, 7.8, 0.84], [-0.08, 9.0, 0.75],
+    [0.58, 7.5, 0.82], [1.21, 9.8, 0.78], [1.86, 8.1, 0.87], [2.43, 9.2, 0.8], [3.04, 7.6, 0.83],
+  ];
+  // each whole rose leans toward the rink interior (radially, from its own spot) by a fixed 10–15° angle
+  const ROSE_TILT_DEG = [12, 14, 10.5, 13, 11, 15, 12.5, 10, 13.5, 11.5];
+  {
+    const r3 = mulberry32(5150), parts = createRoseGeometry();
+    const roseMat = exteriorMaterial({ color: 0xf7f4ef, roughness: 0.82, emissive: 0x34322f, emissiveIntensity: 0.5 }, glow);   // soft white clay
+    const leafMat = exteriorMaterial({ color: 0x5a8f63, roughness: 0.8, side: THREE.DoubleSide }, glow);                      // muted natural green (thin leaves: both sides)
+    const heads = new THREE.InstancedMesh(parts.head, roseMat, ROSES.length);
+    const greens = new THREE.InstancedMesh(parts.green, leafMat, ROSES.length);
+    heads.name = 'RoseHeads'; greens.name = 'RoseStems';
+    const m = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler();
+    ROSES.forEach(([th, out, sc], i) => {
+      let [x, z] = at(th, out);
+      for (let tries = 0; tries < 10 && !clear(x, z, 1.2); tries++) [x, z] = at(th + (r3() - 0.5) * 0.2, out + r3() * 2);
+      r3(); const yaw = r3() * Math.PI * 2; r3();                    // (same random draws as before: placement unchanged)
+      e.set(0, yaw, 0, 'YXZ');
+      // lean toward the ice: rotate about the horizontal axis up × inward, pivoting at the base in the snow
+      const n = rinkNormal(x, z), inward = new THREE.Vector3(-n.x, 0, -n.z);
+      const axis = new THREE.Vector3(0, 1, 0).cross(inward).normalize();
+      const lean = new THREE.Quaternion().setFromAxisAngle(axis, THREE.MathUtils.degToRad(ROSE_TILT_DEG[i % ROSE_TILT_DEG.length]));
+      q.setFromEuler(e).premultiply(lean);                            // spin about its own stem first, then lean the whole plant
+      m.compose(new THREE.Vector3(x, groundAt(x, z), z), q, new THREE.Vector3(sc, sc, sc));
+      heads.setMatrixAt(i, m); greens.setMatrixAt(i, m);
+      blob(x, z, 1.1 * sc);
+      placed.push([x, z, 1.2]);
+    });
+    for (const im of [heads, greens]) { im.instanceMatrix.needsUpdate = true; im.computeBoundingSphere(); group.add(im); }
   }
 
   // everything above is drawn by the main camera only (not by the ice reflection)
