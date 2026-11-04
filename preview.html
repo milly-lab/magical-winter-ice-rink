@@ -57,6 +57,46 @@
   <body>
     <div id="app"></div>
     <div class="title">Magical Winter Forest Ice Rink · WASD / 방향키로 이동</div>
+    <!-- (2026-11-04) start-up diagnostics. A plain script, so it still works if the 3D module never loads: it records
+         errors (also in the console as [Rink]), shows a readable message if the scene has not started after 30 s or a
+         start-up error occurs, and hides it again as soon as the first frame is drawn. Add ?debug=1 to the address for
+         a small status line (render mode, pixel ratio, GPU, errors). -->
+    <script>
+    (function () {
+      var D = window.__rinkDiag = { errors: [], info: {}, started: false, debug: /[?&]debug=1/.test(location.search) };
+      var box = null;
+      function esc(t) { return String(t).replace(/[&<>]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); }
+      D.log = function (m) { D.errors.push(m); try { console.warn('[Rink]', m); } catch (e) {} };
+      D.show = function (title, hint) {
+        if (!box) {
+          box = document.createElement('div'); box.id = 'rink-diag';
+          box.style.cssText = 'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:50;width:min(86vw,360px);'
+            + 'padding:18px 18px 14px;border-radius:16px;background:rgba(10,16,30,.92);border:1px solid rgba(246,241,231,.2);color:#f0f6fc;'
+            + 'font:400 14px/1.55 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Noto Sans KR",sans-serif;text-align:center';
+          document.body.appendChild(box);
+        }
+        box.innerHTML = '<div style="font-weight:600;margin-bottom:6px">' + esc(title) + '</div>'
+          + (hint ? '<div style="opacity:.8;font-size:13px">' + esc(hint) + '</div>' : '')
+          + (D.errors.length ? '<div style="margin-top:10px;text-align:left;font:11px/1.45 ui-monospace,Menlo,monospace;opacity:.7;max-height:30vh;overflow:auto;word-break:break-all">'
+            + D.errors.slice(-4).map(esc).join('<br>') + '</div>' : '')
+          + '<button onclick="location.reload()" style="margin-top:12px;padding:9px 18px;border-radius:999px;border:1px solid rgba(240,246,252,.35);background:none;color:#f0f6fc;font:inherit">새로고침</button>';
+        box.style.display = 'block';
+      };
+      D.hide = function () { if (box) box.style.display = 'none'; };
+      window.addEventListener('error', function (e) {
+        var t = e.target;
+        if (t && t !== window && (t.src || t.href)) { D.log('불러오기 실패: ' + (t.src || t.href)); return; }   // (font etc.: logged only)
+        D.log((e.message || 'Error') + (e.filename ? ' (' + e.filename.split('/').pop().slice(0, 40) + ':' + e.lineno + ')' : ''));
+        if (!D.started) D.show('3D 장면을 시작하지 못했어요.', '아래 오류 내용을 캡처해서 보내 주세요.');
+      }, true);
+      window.addEventListener('unhandledrejection', function (e) { D.log('Promise: ' + ((e.reason && e.reason.message) || e.reason)); });
+      setTimeout(function () {
+        if (!D.started) D.show('3D 장면이 아직 시작되지 않았어요.', '인터넷 연결을 확인하고 새로고침해 주세요. 계속되면 이 화면을 캡처해 주세요.');
+      }, 30000);
+    })();
+    </script>
+    <!-- (2026-11-04) import-map support for older browsers (e.g. iOS Safari before 16.4); does nothing where import maps work -->
+    <script async src="https://cdn.jsdelivr.net/npm/es-module-shims@1.8.0/dist/es-module-shims.js"></script>
     <script type="importmap">
     { "imports": {
         "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
@@ -5343,13 +5383,35 @@ class Celebration {
 
 
 // ---- renderer --------------------------------------------------------------
-const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.75));
+// (2026-11-04) phones / tablets with touch: lighter rendering (pixel ratio ≤ 1.25, no MSAA in post); desktop unchanged
+const DIAG = window.__rinkDiag || { errors: [], info: {}, log: (m) => console.warn('[Rink]', m), show() {}, hide() {} };
+const IS_MOBILE = matchMedia('(pointer: coarse)').matches && Math.min(screen.width, screen.height) <= 900;
+let renderer;
+try {
+  renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+} catch (e) {
+  DIAG.log('WebGL: ' + e.message);
+  DIAG.started = true;                                                  // (no watchdog message on top of this one)
+  DIAG.show('이 브라우저에서는 3D 그래픽(WebGL 2)을 사용할 수 없어요.', '최신 Safari 또는 Chrome에서 열어 주세요.');
+  throw e;
+}
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, IS_MOBILE ? 1.25 : 1.75));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = LIGHTING.exposure;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 document.getElementById('app').appendChild(renderer.domElement);
+// GPU context lost (e.g. iOS reclaiming memory): three.js keeps the scene and rebuilds GPU resources when it comes
+// back; meanwhile a short note is shown instead of a silent blank screen
+renderer.domElement.addEventListener('webglcontextlost', () => {
+  DIAG.log('WebGL context lost');
+  DIAG.show('그래픽을 다시 불러오는 중이에요…', '잠시 후에도 화면이 비어 있으면 새로고침해 주세요.');
+});
+renderer.domElement.addEventListener('webglcontextrestored', () => {
+  DIAG.log('WebGL context restored');
+  DIAG.hide();
+  if (window.__rinkRender) window.__rinkRender.verify = true;          // re-check the post-processing targets
+});
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(38, window.innerWidth / window.innerHeight, 0.1, 1200);
@@ -5532,13 +5594,72 @@ function setActionBusy(b) {
 }
 
 // ---- post: HDR target with MSAA → bloom → tone mapping ---------------------
+// (2026-11-04) the half-float target needs EXT_color_buffer_float / _half_float; without it the GPU cannot draw into it
+// and the whole 3D view stays blank. Use 8-bit then; phones skip MSAA. Desktop with the extension: unchanged.
 const buf = renderer.getDrawingBufferSize(new THREE.Vector2());
-const rt = new THREE.WebGLRenderTarget(buf.x, buf.y, { type: THREE.HalfFloatType, samples: 4 });
+const FLOAT_RT_OK = renderer.extensions.has('EXT_color_buffer_float') || renderer.extensions.has('EXT_color_buffer_half_float');
+const rt = new THREE.WebGLRenderTarget(buf.x, buf.y, {
+  type: FLOAT_RT_OK ? THREE.HalfFloatType : THREE.UnsignedByteType, samples: IS_MOBILE ? 0 : 4,
+});
 const composer = new EffectComposer(renderer, rt);
 composer.addPass(new RenderPass(scene, camera));
 const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), LIGHTING.bloom.strength, LIGHTING.bloom.radius, LIGHTING.bloom.threshold);
 composer.addPass(bloom);
 composer.addPass(new OutputPass());
+// render path: 'composer' (bloom, as designed) or 'direct' (renderer.render: same tone mapping and colours, no bloom).
+// The composer is used only if every one of its targets is a complete framebuffer on this GPU and it draws without
+// a GL error; otherwise (or if it throws) the same loop switches to direct rendering — never a blank scene.
+// ?render=direct / ?render=composer force a path (for testing).
+const RENDER = window.__rinkRender = {
+  mode: /[?&]render=direct/.test(location.search) ? 'direct' : 'composer',
+  verify: true,                                                       // check before the first composer frame
+  firstFrame: true,
+};
+function postTargetsComplete() {
+  const gl = renderer.getContext();
+  const targets = [composer.renderTarget1, composer.renderTarget2, bloom.renderTargetBright, ...bloom.renderTargetsHorizontal, ...bloom.renderTargetsVertical];
+  let bad = null;
+  for (const t of targets) {
+    renderer.setRenderTarget(t);
+    const st = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    if (st !== gl.FRAMEBUFFER_COMPLETE) { bad = `framebuffer incomplete (0x${st.toString(16)}) ${t.width}x${t.height}`; break; }
+  }
+  renderer.setRenderTarget(null);
+  return bad;
+}
+function useDirectRendering(reason) {
+  if (RENDER.mode === 'direct') return;
+  RENDER.mode = 'direct';
+  DIAG.log('post-processing off → direct rendering: ' + reason);
+  renderer.setRenderTarget(null);
+  try { composer.renderTarget1.dispose(); composer.renderTarget2.dispose(); bloom.dispose(); } catch (e) { /* ignore */ }
+}
+function renderFrame(dt) {
+  if (RENDER.mode === 'composer' && !/[?&]render=composer/.test(location.search) && RENDER.verify) {
+    RENDER.verify = false;
+    const bad = postTargetsComplete();
+    if (bad) useDirectRendering(bad);
+  }
+  if (RENDER.mode === 'composer') {
+    const gl = renderer.getContext();
+    try {
+      composer.render(dt);
+      if (RENDER.firstFrame) {                                            // a GPU that accepted the targets but cannot draw
+        const err = gl.getError();
+        if (err === gl.INVALID_FRAMEBUFFER_OPERATION) useDirectRendering('GL error 0x' + err.toString(16));
+      }
+    } catch (e) { useDirectRendering(e.message); }
+  }
+  if (RENDER.mode === 'direct') renderer.render(scene, camera);
+  if (RENDER.firstFrame) {
+    RENDER.firstFrame = false;
+    DIAG.started = true; DIAG.hide();
+    const gl = renderer.getContext(), b = renderer.getDrawingBufferSize(new THREE.Vector2());
+    DIAG.info = { mode: RENDER.mode, mobile: IS_MOBILE, pixelRatio: renderer.getPixelRatio(), buffer: `${b.x}x${b.y}`, floatRT: FLOAT_RT_OK,
+      maxSamples: gl.getParameter(gl.MAX_SAMPLES), fragUniforms: gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS) };
+    console.info('[Rink] started', DIAG.info);
+  }
+}
 
 function onResize() {
   const w = window.innerWidth, h = window.innerHeight;
@@ -5546,8 +5667,7 @@ function onResize() {
   fitCameraFov(camera.aspect);
   camera.updateProjectionMatrix();
   renderer.setSize(w, h);
-  composer.setSize(w, h);
-  bloom.resolution.set(w, h);
+  if (RENDER.mode === 'composer') { composer.setSize(w, h); bloom.resolution.set(w, h); }
   const b = renderer.getDrawingBufferSize(new THREE.Vector2());
   world.setSize(b.x, b.y, renderer.getPixelRatio());
   if (typeof skateFx !== 'undefined') skateFx.setViewportHeight(b.y);
@@ -5556,6 +5676,10 @@ function onResize() {
   if (typeof celebration !== 'undefined') celebration.setViewportHeight(b.y);
 }
 window.addEventListener('resize', onResize);
+// phones: orientation changes / browser bars report their final size a moment later
+const onResizeLater = () => { onResize(); setTimeout(onResize, 350); };
+window.addEventListener('orientationchange', onResizeLater);
+if (window.visualViewport) window.visualViewport.addEventListener('resize', onResize);
 
 // ---- loop ------------------------------------------------------------------
 // Fixed-step simulation (2026-11-02): gameplay (skating physics, Triple Axel, Spin, partner skating) advances in
@@ -5620,8 +5744,21 @@ renderer.setAnimationLoop((now) => {
   const t = (now - start) / 1000;
   updateFps(realDt);
   simulate(realDt, t);
-  composer.render(Math.min(realDt, MAX_CATCH_UP));
+  renderFrame(Math.min(realDt, MAX_CATCH_UP));
 });
+
+// ?debug=1: a small status line for checking on a phone (render path, pixel ratio, buffer size, errors)
+if (DIAG.debug) {
+  const el = document.createElement('div');
+  el.style.cssText = 'position:fixed;left:8px;bottom:calc(76px + env(safe-area-inset-bottom));z-index:20;pointer-events:none;max-width:70vw;'
+    + 'padding:4px 8px;border-radius:8px;background:rgba(0,0,0,.55);color:#f0f6fc;font:10px/1.4 ui-monospace,Menlo,monospace;white-space:pre-wrap';
+  document.body.appendChild(el);
+  setInterval(() => {
+    const i = DIAG.info || {};
+    el.textContent = `render ${RENDER.mode} · pr ${i.pixelRatio} · ${i.buffer} · floatRT ${i.floatRT} · mobile ${i.mobile}\n`
+      + `errors ${DIAG.errors.length}${DIAG.errors.length ? ': ' + DIAG.errors[DIAG.errors.length - 1].slice(0, 120) : ''}`;
+  }, 1000);
+}
 
     </script>
   </body>
