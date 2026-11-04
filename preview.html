@@ -2,17 +2,57 @@
 <html lang="ko">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <title>Magical Winter Forest Ice Rink</title>
     <style>
       html, body { margin: 0; height: 100%; background: #060c1a; overflow: hidden; }
+      /* mobile (2026-11-03): the page never scrolls / bounces / zooms; only UI panels scroll inside themselves */
+      body { position: fixed; inset: 0; overscroll-behavior: none; touch-action: none;
+        -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+        -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
       #app, canvas { display: block; width: 100%; height: 100%; }
+      button, input { touch-action: manipulation; }
+      .hud-pop { touch-action: pan-y; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+      /* bottom action buttons: 13px on desktop, a little smaller on phones so all three fit on one line */
+      .action-btn { font-size: 13px !important; }
+      @media (max-width: 480px) { .action-btn { font-size: 12px !important; padding: 13px clamp(14px, 4.2vw, 22px) !important; } }
+      /* touch screens: comfortable tap targets (≥ 40 px) */
+      @media (pointer: coarse) {
+        .hud-btn { height: 40px !important; min-width: 40px; }
+        .hud-count { height: 40px !important; }
+        .action-btn { padding-top: 14px !important; padding-bottom: 14px !important; }
+        .tap-pill { padding: 13px 17px !important; }
+        .radial-pill { padding: 14px 21px !important; }
+        .hud-vol input[type=range] { height: 28px; }
+      }
+      /* her radial menu (2026-11-03): items sit on a semicircle around her head; locked 고백하기 is dimmed by colour */
+      /* (2026-11-04) one label colour for every button in the UI */
+      button { color: #f0f6fc !important; }
+      .radial-item[aria-disabled=true] { color: rgba(240,246,252,.42) !important; border-color: rgba(243,217,184,.18) !important; cursor: default !important; }
+      /* contextual action pills (her menu + rose 줍기): one shared look */
+      @media (max-width: 420px) { .radial-pill { font-size: 12px !important; padding-left: 19px !important; padding-right: 19px !important; } }
+      /* bottom actions: one capsule, three areas with faint dividers */
+      .action-btn { position: relative; }
+      .action-btn + .action-btn::before { content: ''; position: absolute; left: 0; top: 26%; bottom: 26%; width: 1px;
+        background: rgba(243,217,184,.2); pointer-events: none; }
+      /* hover feedback (mouse / trackpad only — never on touch screens); no size change, disabled stays disabled */
+      button { transition-duration: .2s; }
+      button:not(.radial-item) { transition-property: opacity, filter, background-color, transform, color, border-color !important; }
+      @media (hover: hover) and (pointer: fine) {
+        button:not(:disabled):not([aria-disabled=true]):hover { filter: brightness(1.22); }
+        .action-btn:not(:disabled):hover { background-color: rgba(243,217,184,.08) !important; }
+      }
+      button:disabled { cursor: default !important; }
+      /* phones: the keyboard hint (WASD) would sit under the action buttons */
+      @media (max-width: 760px), (pointer: coarse) and (max-height: 520px) { .title { display: none; } }
       .title {
-        position: fixed; left: 28px; bottom: 24px; color: #f3d9b8; opacity: 0.75;
-        font: 300 13px/1.5 "Helvetica Neue", Arial, sans-serif; letter-spacing: 0.22em;
+        position: fixed; left: calc(28px + env(safe-area-inset-left)); bottom: calc(24px + env(safe-area-inset-bottom)); color: #f3d9b8; opacity: 0.75;
+        font: 300 13px/1.5 "Helvetica Neue", Arial, sans-serif; letter-spacing: 0;
         text-transform: uppercase; pointer-events: none;
       }
     </style>
+    <!-- Pretendard (HUD + action buttons) -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
   </head>
   <body>
     <div id="app"></div>
@@ -151,6 +191,8 @@ function sceneColorForDisplay(hex) {
   const x = new THREE.Vector3(...v).applyMatrix3(ACES_IN.clone().invert()).multiplyScalar(0.6 / LIGHTING.exposure);
   return new THREE.Color().setRGB(Math.max(0, x.x), Math.max(0, x.y), Math.max(0, x.z), THREE.LinearSRGBColorSpace);
 }
+// cabin wall wood (log cabins in world/winterScenery.js); the rink fence uses the same colour (2026-11-04)
+const CABIN_WOOD_COLOR = 0x5c3b27;
 // the plain night colour in scene (linear) space: sky dome, scene background and fog
 const NIGHT_BG = sceneColorForDisplay(PALETTE.night);
 
@@ -338,8 +380,8 @@ function warmBulbColor(rng, palette, intensityRange) {
 // ===== world/sky.js =====
 
 
-// Plain deep-navy dome (one flat colour = NIGHT_BG, no gradient), a sparse handful of dim stars and a small
-// faint moon. No city glow, no buildings, no scenery.
+// Deep-navy dome: NIGHT_BG at the horizon (same as the fog, so the hills still melt into it), fading smoothly to
+// almost-black overhead (2026-11-03), a sparse handful of dim stars and a small faint moon.
 
 function createSky({ radius = 450 } = {}) {
   const group = new THREE.Group();
@@ -353,6 +395,7 @@ function createSky({ radius = 450 } = {}) {
       fog: false,
       uniforms: {
         uColor: { value: NIGHT_BG },
+        uTop: { value: sceneColorForDisplay(0x020307) },          // near jet black at the zenith
       },
       vertexShader: /* glsl */ `
         varying vec3 vDir;
@@ -361,9 +404,18 @@ function createSky({ radius = 450 } = {}) {
           gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
         }`,
       fragmentShader: /* glsl */ `
-        uniform vec3 uColor;
+        uniform vec3 uColor; uniform vec3 uTop;
+        varying vec3 vDir;
         void main() {
-          gl_FragColor = vec4( uColor, 1.0 );   // one plain colour (same as the fog, so the snow melts into it)
+          // horizon (and below): NIGHT_BG exactly; only a narrow band of softer navy, then a smooth fade through
+          // very dark navy to near-black (2026-11-03: transition moved much lower)
+          float t = smoothstep( 0.004, 0.2, vDir.y );                  // (2026-11-03: narrower bright band, ~10%)
+          float k = 1.0 - pow( 1.0 - t, 2.4 );
+          vec3 col = mix( uColor, uTop, k );
+          // tiny screen-space dither so the long dark gradient shows no banding
+          float n = fract( 52.9829189 * fract( dot( gl_FragCoord.xy, vec2( 0.06711056, 0.00583715 ) ) ) ) - 0.5;
+          col += n * 0.004 * uColor;
+          gl_FragColor = vec4( max( col, 0.0 ), 1.0 );
         }`,
     })
   );
@@ -417,31 +469,76 @@ function createSky({ radius = 450 } = {}) {
   stars.frustumCulled = false;
   group.add(stars);
 
-  // --- small faint moon -----------------------------------------------------
+  // --- the moon (2026-11-03): ~4× larger, low enough to be seen from the rink, distant and hazy ----------------
+  // Its picture is painted once into a small canvas texture (soft grey-lavender disc, darker maria, subtle craters,
+  // lit from the left with a faint dark side, limb darkening); the shader only adds a soft haze. The cool key light
+  // still uses MOON_DIR (lighting unchanged); only the visible disc moved, toward MOON_VIEW_DIR.
   const moonDir = new THREE.Vector3(...MOON_DIR).normalize();
+  const moonViewDir = new THREE.Vector3(-0.3, 0.3, -0.9).normalize();   // ~17° above the horizon, a little left of the tree
+  const moonTex = (() => {
+    const N = 256, cv = document.createElement('canvas'); cv.width = cv.height = N;
+    const g = cv.getContext('2d'), rnd = mulberry32(919);
+    // albedo: base grey, broad darker maria, small craters (dark floor + faint bright rim)
+    const al = document.createElement('canvas'); al.width = al.height = N;
+    const a = al.getContext('2d');
+    a.fillStyle = 'rgb(186,186,196)'; a.fillRect(0, 0, N, N);
+    for (let k = 0; k < 1; k++) {                                    // (2026-11-04: ~10% of the markings kept)
+      const x = N * (0.25 + rnd() * 0.5), y = N * (0.2 + rnd() * 0.55), r = N * (0.08 + rnd() * 0.13);
+      const gr = a.createRadialGradient(x, y, 0, x, y, r);
+      gr.addColorStop(0, 'rgba(92,92,108,0.55)'); gr.addColorStop(1, 'rgba(92,92,108,0)');
+      a.fillStyle = gr; a.beginPath(); a.arc(x, y, r, 0, Math.PI * 2); a.fill();
+    }
+    for (let k = 0; k < 7; k++) {
+      const x = N * (0.1 + rnd() * 0.8), y = N * (0.1 + rnd() * 0.8), r = N * (0.006 + Math.pow(rnd(), 2.2) * 0.035);
+      a.fillStyle = 'rgba(70,70,84,0.24)'; a.beginPath(); a.arc(x, y, r, 0, Math.PI * 2); a.fill();
+      a.strokeStyle = 'rgba(230,230,240,0.16)'; a.lineWidth = Math.max(0.6, r * 0.25);
+      a.beginPath(); a.arc(x - r * 0.15, y - r * 0.15, r, Math.PI * 0.9, Math.PI * 1.9); a.stroke();
+    }
+    const src = a.getImageData(0, 0, N, N).data, img = g.createImageData(N, N), d = img.data;
+    const L = new THREE.Vector3(-0.78, 0.18, 0.6).normalize();          // sun from the left → gibbous, like the reference
+    for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+      const u = (x + 0.5) / N * 2 - 1, v = 1 - (y + 0.5) / N * 2, rr = u * u + v * v, o = (y * N + x) * 4;
+      if (rr > 1) { d[o + 3] = 0; continue; }
+      const nz = Math.sqrt(1 - rr), lam = Math.max(0, u * L.x + v * L.y + nz * L.z);
+      const lit = THREE.MathUtils.smoothstep(lam, 0.0, 0.35) * (0.55 + 0.45 * lam) + 0.07;   // soft terminator, faint dark side
+      const limb = 0.72 + 0.28 * nz, grain = 0.94 + rnd() * 0.12;
+      const k = lit * limb * grain;
+      d[o] = src[o] * k; d[o + 1] = src[o + 1] * k; d[o + 2] = Math.min(255, src[o + 2] * k * 1.04);
+      d[o + 3] = 255 * THREE.MathUtils.smoothstep(1 - rr, 0, 0.04);   // soft edge
+    }
+    g.putImageData(img, 0, 0);
+    const t = new THREE.CanvasTexture(cv);
+    t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  })();
   const moon = new THREE.Mesh(
     new THREE.PlaneGeometry(1, 1),
     new THREE.ShaderMaterial({
       transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
+      depthWrite: true,                                                // (inside its round halo only — see discard)
       fog: false,
+      uniforms: { uTex: { value: moonTex }, uSky: { value: NIGHT_BG } },
       vertexShader: /* glsl */ `
         varying vec2 vUv;
         void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 ); }`,
       fragmentShader: /* glsl */ `
+        uniform sampler2D uTex; uniform vec3 uSky;
         varying vec2 vUv;
         void main() {
-          float r = length( vUv - 0.5 ) * 2.0;
-          float disc = smoothstep( 0.2, 0.18, r );
-          float halo = exp( - r * 5.0 ) * 0.12;
-          vec3 col = vec3( 0.52, 0.58, 0.7 ) * disc * 0.55 + vec3( 0.25, 0.32, 0.5 ) * halo;
-          gl_FragColor = vec4( col, 1.0 );
+          vec2 q = ( vUv - 0.5 ) * 2.0;
+          float r = length( q );
+          if ( r > 0.98 ) discard;
+          vec4 m = r < 0.62 ? texture2D( uTex, ( q / 0.62 ) * 0.5 + 0.5 ) : vec4( 0.0 );   // disc = 62% of the plane
+          vec3 col = m.rgb * 0.34;                                     // dim: distant, never glaring
+          col = mix( col, uSky * 1.6 + vec3( 0.02, 0.025, 0.04 ), 0.22 );   // a veil of night haze over it
+          float halo = exp( - max( r - 0.6, 0.0 ) * 7.0 ) * 0.09 * ( 1.0 - m.a );
+          gl_FragColor = vec4( col * m.a + vec3( 0.12, 0.14, 0.2 ) * halo, max( m.a * 0.93, halo ) );
         }`,
     })
   );
-  moon.position.copy(moonDir).multiplyScalar(radius * 0.85);
-  moon.scale.setScalar(34);
+  moon.position.copy(moonViewDir).multiplyScalar(radius * 0.85);
+  moon.scale.setScalar(34 * 4 * 0.19 / 0.62);                         // disc ≈ 4× the old disc's apparent size (~3.9°)
+  moon.renderOrder = -9;                                               // before the stars: it covers the ones behind it
   moon.lookAt(0, 0, 0);
   group.add(moon);
 
@@ -646,6 +743,50 @@ function createGround({ glow }) {
   ground.name = 'SnowGround';
   group.add(ground);
 
+  // ---- 2 distant hill layers behind the snowfield (2026-11-03): overlapping soft silhouettes for depth ----
+  // Cheap on mobile: ~2.2k triangles each, unlit (soft shading baked into vertex colours, no per-pixel lights or
+  // glow), fogged like everything else; the farther layer is darker and less saturated. Main camera only.
+  const shadeDir = new THREE.Vector3(-0.45, 0.7, -0.55).normalize();
+  for (const L of [
+    { R: 165, H: [22, 38], seed: 1.3, lit: 0x5a5f8c, dark: 0x2c3157 },   // nearer back layer: soft lavender-navy snow
+    { R: 255, H: [40, 66], seed: 4.1, lit: 0x343a66, dark: 0x1c2142 },   // farthest: darker, greyer, flatter in tone
+  ]) {
+    const SEGS = 180, rows = [[-34, -0.25], [-16, 0.5], [-6, 0.86], [0, 1], [7, 0.9], [20, 0.55], [44, 0.08]];
+    const hp = [], hc = [], hi = [];
+    const lit = sceneColorForDisplay(L.lit), dark = sceneColorForDisplay(L.dark);
+    for (let j = 0; j <= SEGS; j++) {
+      const a = (j / SEGS) * Math.PI * 2, s0 = L.seed;
+      const n = 0.5 + 0.28 * Math.sin(3 * a + s0) + 0.14 * Math.sin(7 * a + 2.1 * s0) + 0.08 * Math.sin(13 * a + s0 * 0.7);
+      const H = L.H[0] + (L.H[1] - L.H[0]) * Math.min(1, Math.max(0, n));
+      const dr = 9 * Math.sin(2 * a + s0 * 1.7) + 5 * Math.sin(5 * a - s0);
+      for (const [off, f] of rows) {
+        const r = L.R + dr + off;
+        hp.push(r * Math.cos(a), f < 0 ? f * 24 : f * H, r * Math.sin(a));
+      }
+    }
+    const NR = rows.length;
+    for (let j = 0; j < SEGS; j++) for (let k = 0; k < NR - 1; k++) {
+      const a = j * NR + k, b = a + NR;
+      hi.push(a, b, a + 1, a + 1, b, b + 1);
+    }
+    const hg = new THREE.BufferGeometry();
+    hg.setAttribute('position', new THREE.Float32BufferAttribute(hp, 3));
+    hg.setIndex(hi);
+    hg.computeVertexNormals();
+    const nr = hg.attributes.normal, c = new THREE.Color();
+    for (let v = 0; v < nr.count; v++) {
+      const w = Math.min(1, Math.max(0, (nr.getX(v) * shadeDir.x + nr.getY(v) * shadeDir.y + nr.getZ(v) * shadeDir.z) * 0.6 + 0.45));
+      c.copy(dark).lerp(lit, w);
+      hc.push(c.r, c.g, c.b);
+    }
+    hg.setAttribute('color', new THREE.Float32BufferAttribute(hc, 3));
+    hg.computeBoundingSphere();
+    const hills = new THREE.Mesh(hg, new THREE.MeshBasicMaterial({ vertexColors: true, fog: true }));
+    hills.name = 'DistantHills';
+    hills.layers.set(EXTERIOR_LAYER);
+    group.add(hills);
+  }
+
   return { group, material: snowMat };
 }
 
@@ -733,8 +874,8 @@ const SNOW_TREE = {
   snowThick: 0.2,                                                 // fluffy snow layer thickness on the bottom tier
   segs: 30,
 };
-function createSnowTreeParts() {
-  const S = SNOW_TREE, P = 0.6, segs = S.segs;
+function createSnowTreeParts(segs = SNOW_TREE.segs, trunkSegs = 20) {   // (fewer segments = the far-tree LOD)
+  const S = SNOW_TREE, P = 0.6;
   const greens = [], snows = [];
   S.tiers.forEach((T, k) => {
     const top = k === S.tiers.length - 1;
@@ -800,7 +941,7 @@ function createSnowTreeParts() {
   const trunk = new THREE.LatheGeometry([
     [0, tr.bottom], [tr.rBottom * 1.02, tr.bottom], [tr.rBottom * 0.97, -0.12], [tr.rBottom * 0.86, 0.22], [tr.rTop * 1.05, 0.65],
     [tr.rTop * 1.01, 1.2], [tr.rTop, tr.top - 0.08], [tr.rTop * 0.6, tr.top], [0, tr.top + 0.02],
-  ].map(([r, y]) => new THREE.Vector2(r, y)), 20);
+  ].map(([r, y]) => new THREE.Vector2(r, y)), trunkSegs);
   const green = mergeGeometries(greens), snow = mergeGeometries(snows);
   green.scale(S.widen, 1, S.widen); snow.scale(S.widen, 1, S.widen);
   return { green, snow, trunk };
@@ -977,15 +1118,21 @@ function createWinterScenery({ glow, renderer }) {
   });
   const blobGeo = new THREE.PlaneGeometry(1, 1);
   blobGeo.rotateX(-Math.PI / 2);
-  const blob = (x, z, sx, sz = sx, yaw = 0, mat = shadowMat, lift = 0.03, order = 1) => {
+  // (2026-11-03, mobile) static blobs are collected and drawn as ONE InstancedMesh per material at the end
+  // (was one draw call each); only the roses' blobs, which move when a rose respawns, stay separate meshes
+  const blobBatches = new Map();                                       // material → { order, matrices[] }
+  const blob = (x, z, sx, sz = sx, yaw = 0, mat = shadowMat, lift = 0.03, order = 1, dynamic = false) => {
     const m = new THREE.Mesh(blobGeo, mat);
     m.position.set(x, groundAt(x, z) + lift, z);
     m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), normalAt(x, z));
     m.rotateY(yaw);
     m.scale.set(sx, 1, sz);
     m.renderOrder = order;
-    group.add(m);
-    return m;
+    if (dynamic) { group.add(m); return m; }
+    m.updateMatrix();
+    if (!blobBatches.has(mat)) blobBatches.set(mat, { order, matrices: [] });
+    blobBatches.get(mat).matrices.push(m.matrix.clone());
+    return null;
   };
 
   // ======== layout: hand-picked anchors + seeded, spacing-checked scattering (same result on every load) ========
@@ -998,7 +1145,7 @@ function createWinterScenery({ glow, renderer }) {
   const clear = (x, z, r) => placed.every(([px, pz, pr]) => Math.hypot(x - px, z - pz) > r + pr);
 
   // ---- three log cabins: same style, different sizes and window layouts (no deck, no chimney, no snow piles) ----
-  const wood = exteriorMaterial({ color: 0x5c3b27, roughness: 0.9 }, glow);
+  const wood = exteriorMaterial({ color: CABIN_WOOD_COLOR, roughness: 0.9 }, glow);
   const darkWood = exteriorMaterial({ color: 0x3b2619, roughness: 0.95 }, glow);
   const pane = new THREE.MeshBasicMaterial({ color: new THREE.Color(1.0, 0.55, 0.2).multiplyScalar(2.0) });
   const spillMat = new THREE.MeshBasicMaterial({
@@ -1078,6 +1225,7 @@ function createWinterScenery({ glow, renderer }) {
   for (const C of CABINS) {
     const [x, z] = at(C.theta, C.out);
     const { cabin, spills, W, D } = buildCabin(C.spec);
+    C.built = { cabin, spills, W, D };
     cabin.name = C.name;
     // front faces the ice; Cabin C turns a corner to the ice so its front AND right side windows both show
     const yaw = towardRink(x, z) + (C.corner ? -Math.PI / 4 : 0) + (rng() - 0.5) * 0.25;
@@ -1147,7 +1295,7 @@ function createWinterScenery({ glow, renderer }) {
   deer.rotation.y = towardRink(deerX, deerZ) + 0.75;                      // 3/4 view from the ice
   deer.scale.setScalar(1.15);
   group.add(deer);
-  blob(deerX, deerZ, 1.5, 2.1, deer.rotation.y);
+  blob(deerX, deerZ, 1.85, 1.85);                                       // round: the reindeer turns slowly in place
   placed.push([deerX, deerZ, 8]);
 
   // ---- ice snowflake ornaments (10): solid, glossy, translucent ice in four shapes and three size classes ----
@@ -1237,25 +1385,27 @@ function createWinterScenery({ glow, renderer }) {
       const th = ((i + 0.3 + rng() * 0.6) / 8) * Math.PI * 2, out = 80 + rng() * 60, s = 1.3 + rng() * 0.5;
       const [x, z] = at(th, out);
       if (!clear(x, z, 10)) continue;
-      TREES.push([x, z, s]); placed.push([x, z, 10]);
+      TREES.push([x, z, s, true]); placed.push([x, z, 10]);              // (true = far: drawn with the light LOD)
       break;
     }
   }
-  const treeParts = createSnowTreeParts();
-  const greenMat = exteriorMaterial({ color: 0x4f7f63, roughness: 0.9 }, glow);      // dark muted evergreen green
-  const trunkMat = exteriorMaterial({ color: 0xc48f5c, roughness: 0.9 }, glow);      // lighter, warmer natural brown (2026-11-03; reads as mid brown at night)
-  const treeMeshes = [[treeParts.green, greenMat, 'SnowTreesGreen'], [treeParts.snow, snowMat, 'SnowTreesSnow'], [treeParts.trunk, trunkMat, 'SnowTreesTrunk']]
-    .map(([geo, mat, name]) => { const im = new THREE.InstancedMesh(geo, mat, TREES.length); im.name = name; return im; });
+  // (2026-11-04) far trees that the two distant hill layers (world/ground.js) bury or hide from the ice: removed.
+  // Found by measuring each tree against the hill meshes (hill above its base / line of sight from the ice).
+  const HILL_BURIED_TREES = [[181, 86], [79, 165], [-66, 163], [-173, 65], [-134, -112], [-24, -153], [50, -135], [148, -64],
+    [-139, -89], [139, -88], [125, 95], [-153, 70]];
+  const buriedInHills = (x, z) => HILL_BURIED_TREES.some(([bx, bz]) => Math.hypot(x - bx, z - bz) < 2.5);
+  // tree instance matrices: same random draws, in the same order, as before (so every existing tree is unchanged)
+  const treeXf = [];                                                       // [matrix, far?]
   {
     const m = new THREE.Matrix4(), q = new THREE.Quaternion();
-    TREES.forEach(([x, z, s], i) => {
+    TREES.forEach(([x, z, s, far]) => {
       const sy = s * (0.94 + rng() * 0.12);
       q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), rng() * Math.PI * 2);
       m.compose(new THREE.Vector3(x, groundAt(x, z) - 0.05, z), q, new THREE.Vector3(s, sy, s));
-      for (const im of treeMeshes) im.setMatrixAt(i, m);
+      if (buriedInHills(x, z)) return;                                     // (random draws above still taken: others unchanged)
+      treeXf.push([m.clone(), !!far]);
       blob(x, z, SNOW_TREE.tiers[0].R * SNOW_TREE.widen * s * 2.4);
     });
-    for (const im of treeMeshes) { im.instanceMatrix.needsUpdate = true; im.computeBoundingSphere(); group.add(im); }
   }
 
   // ---- two more snowflakes (10 in total), placed after the trees with their own random stream ----
@@ -1271,18 +1421,6 @@ function createWinterScenery({ glow, renderer }) {
         placed.push([x, z, 3]);
         break;
       }
-    }
-    // one InstancedMesh per shape variant, all sharing the ice material
-    const m = new THREE.Matrix4(), sc = new THREE.Vector3(), pos = new THREE.Vector3();
-    for (let v = 0; v < 4; v++) {
-      const list = flakeXf.filter((f) => f[5] === v);
-      if (!list.length) continue;
-      const im = new THREE.InstancedMesh(createSnowflakeGeometry(v), iceMat, list.length);
-      im.name = 'IceSnowflakes' + v;
-      list.forEach(([x, y, z, q2, size], i) => im.setMatrixAt(i, m.compose(pos.set(x, y, z), q2, sc.setScalar(size))));
-      im.instanceMatrix.needsUpdate = true;
-      im.computeBoundingSphere();
-      group.add(im);
     }
   }
 
@@ -1318,7 +1456,7 @@ function createWinterScenery({ glow, renderer }) {
       q.setFromEuler(e).premultiply(lean);                            // spin about its own stem first, then lean the whole plant
       m.compose(new THREE.Vector3(x, groundAt(x, z), z), q, new THREE.Vector3(sc, sc, sc));
       heads.setMatrixAt(i, m); greens.setMatrixAt(i, m);
-      roseItems.push({ matrix: m.clone(), center: parts.center.clone().applyMatrix4(m), scale: sc, pos: [x, z], blob: blob(x, z, 1.1 * sc) });
+      roseItems.push({ matrix: m.clone(), center: parts.center.clone().applyMatrix4(m), scale: sc, pos: [x, z], blob: blob(x, z, 1.1 * sc, 1.1 * sc, 0, shadowMat, 0.03, 1, true) });
       placed.push([x, z, 1.2]);
     });
     for (const im of [heads, greens]) { im.instanceMatrix.needsUpdate = true; im.computeBoundingSphere(); group.add(im); }
@@ -1347,6 +1485,136 @@ function createWinterScenery({ glow, renderer }) {
     };
   }
 
+  // ======== 2026-11-03 additions (mobile-minded): 2 cabins, 2 reindeer, 10 trees, 7 snowflakes ========
+  // Placed AFTER everything above with their own seeded streams, so no existing object moves. Repeated objects reuse
+  // geometry + materials (cabins / reindeer are clones; trees / snowflakes join the shared InstancedMeshes; far trees
+  // use a lighter LOD); no real lights or shadows; new window glows are decals only (no extra glow points).
+  const rA = mulberry32(7307);
+  const pick = (cands, r, jitter, radial, keep) => {                   // first clear spot among candidates (deterministic)
+    for (const [th, out] of cands) for (let k = 0; k < 14; k++) {
+      const [x, z] = at(th + (rA() - 0.5) * jitter, out + rA() * radial);
+      if (clear(x, z, r)) { placed.push([x, z, keep ?? r]); return [x, z]; }
+    }
+    return null;
+  };
+  // ---- 2 more cabins (5 total), mid / far, reusing the CabinB and CabinA builds ----
+  for (const [src, cands, name] of [[CABINS[1], [[-2.35, 48], [-2.6, 55], [-2.1, 60]], 'CabinD'], [CABINS[0], [[1.72, 58], [1.95, 64], [1.5, 70]], 'CabinE']]) {
+    const { cabin: base, spills, W, D } = src.built;
+    const spot = pick(cands, Math.max(W, D) / 2 + 9, 0.12, 6);
+    if (!spot) continue;
+    const [x, z] = spot, cabin = base.clone();
+    cabin.name = name;
+    const yaw = towardRink(x, z) + (rA() - 0.5) * 0.5;
+    const corners = [[-W / 2 - 0.5, -D / 2 - 0.5], [W / 2 + 0.5, -D / 2 - 0.5], [-W / 2 - 0.5, D / 2 + 0.5], [W / 2 + 0.5, D / 2 + 0.5]]
+      .map(([dx, dz]) => groundAt(x + dx * Math.cos(yaw) + dz * Math.sin(yaw), z - dx * Math.sin(yaw) + dz * Math.cos(yaw)));
+    cabin.position.set(x, Math.min(...corners) - 0.08, z);
+    cabin.rotation.set(0, yaw, 0);                                     // (2026-11-04: yaw only — windows face the ice)
+    cabin.updateMatrixWorld(true);
+    group.add(cabin);
+    blob(x, z, W + 4, D + 4, yaw);
+    for (const [sx, sz, rot] of spills) {
+      const p = cabin.localToWorld(new THREE.Vector3(sx, 0, sz));
+      blob(p.x, p.z, 3.4, 5.2, yaw + rot, spillMat, 0.05, 2);
+    }
+    CABINS.push({ name, pos: [x, z] });
+  }
+  // ---- 2 more reindeer (3 total), near / mid; clones share every geometry + material ----
+  const deers = [{ obj: deer, dir: 1, speed: 0.11, phase: 0, base: deer.rotation.y }];
+  {
+    const headIdx = deer.children.indexOf(deer.userData.head);
+    const ud = deer.userData;
+    for (const [cands, sc, dir, speed, phase] of [[[[0.95, 20], [1.15, 23], [0.7, 26]], 1.0, -1, 0.085, 1.7], [[[-0.42, 30], [-0.6, 34], [-0.2, 38]], 0.92, 1, 0.14, 4.1]]) {
+      const spot = pick(cands, 4, 0.15, 4, 8);
+      if (!spot) continue;
+      deer.userData = {};                                              // (don't deep-copy the head reference)
+      const d = deer.clone();
+      deer.userData = ud;
+      d.userData.head = d.children[headIdx];
+      d.position.set(spot[0], groundAt(spot[0], spot[1]), spot[1]);
+      d.scale.setScalar(1.15 * sc);
+      const base = towardRink(spot[0], spot[1]);
+      d.rotation.set(0, base, 0);                                      // (yaw only; a clone can inherit Euler x/z = π)
+      group.add(d);
+      blob(spot[0], spot[1], 1.85 * sc, 1.85 * sc);
+      deers.push({ obj: d, dir, speed, phase, base });
+    }
+  }
+  // ---- 10 more trees (35 total): 4 in the middle distance, 6 far out on the hills (far = light LOD) ----
+  {
+    const m = new THREE.Matrix4(), q = new THREE.Quaternion();
+    const addTree = (x, z, s, far) => {
+      TREES.push([x, z, s, far]);
+      q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), rA() * Math.PI * 2);
+      m.compose(new THREE.Vector3(x, groundAt(x, z) - 0.05, z), q, new THREE.Vector3(s, s * (0.94 + rA() * 0.12), s));
+      if (buriedInHills(x, z)) return;
+      treeXf.push([m.clone(), far]);
+      blob(x, z, SNOW_TREE.tiers[0].R * SNOW_TREE.widen * s * 2.4);
+    };
+    for (let i = 0; i < 4; i++) {
+      const th = ((i + 0.25) / 4) * Math.PI * 2 - Math.PI, s = 0.8 + rA() * 0.45;
+      const spot = pick([[th, 30], [th + 0.2, 38], [th - 0.2, 46]], SNOW_TREE.tiers[0].R * s + 4, 0.3, 10);
+      if (spot) addTree(spot[0], spot[1], s, false);
+    }
+    for (let i = 0; i < 6; i++) {
+      const th = ((i + 0.55) / 6) * Math.PI * 2 - Math.PI, s = 1.3 + rA() * 0.5;
+      const spot = pick([[th, 92], [th + 0.12, 110], [th - 0.12, 128]], 10, 0.2, 20);
+      if (spot) addTree(spot[0], spot[1], s, true);
+    }
+  }
+  // ---- 7 more ice snowflakes (17 total), small / medium, near to mid distance ----
+  {
+    const q = new THREE.Quaternion(), e = new THREE.Euler();
+    for (const [th, out, size, variant, standing] of [[-1.7, 14, 0.42, 2, true], [-0.95, 20, 0.36, 0, false], [0.15, 26, 0.6, 3, true],
+      [0.62, 16, 0.38, 1, true], [1.45, 22, 0.5, 0, false], [2.3, 18, 0.4, 2, true], [-2.55, 26, 0.55, 1, true]]) {
+      const spot = pick([[th, out], [th + 0.15, out + 4]], 2.5, 0.2, 4, 3);
+      if (!spot) continue;
+      const [x, z] = spot, yaw = rA() * Math.PI * 2;
+      e.set(standing ? (rA() - 0.5) * 0.3 : -Math.PI / 2 + (rA() - 0.5) * 0.3, yaw, standing ? (rA() - 0.5) * 0.25 : 0, 'YXZ');
+      flakeXf.push([x, groundAt(x, z) + (standing ? size * 0.55 : 0.03), z, q.setFromEuler(e).clone(), size, variant]);
+    }
+    // (2026-11-04) one more large one, about a reindeer's size, standing tall across the rink from the first large one
+    const big = pick([[1.2, 31], [0.95, 36], [1.45, 40]], 4.5, 0.15, 5, 5);
+    if (big) {
+      const [x, z] = big, size = 1.65;
+      e.set(0.05, rA() * Math.PI * 2, -0.04, 'YXZ');
+      flakeXf.push([x, groundAt(x, z) + size * 0.86, z, q.setFromEuler(e).clone(), size, 3]);
+    }
+  }
+
+  // ---- build the shared InstancedMeshes (trees: near detail + far LOD; snowflakes: one per shape) ----
+  {
+    const greenMat = exteriorMaterial({ color: 0x4f7f63, roughness: 0.9 }, glow);      // dark muted evergreen green
+    const trunkMat = exteriorMaterial({ color: 0xc48f5c, roughness: 0.9 }, glow);      // lighter, warmer natural brown (2026-11-03; reads as mid brown at night)
+    for (const [far, parts, tag] of [[false, createSnowTreeParts(), ''], [true, createSnowTreeParts(14, 10), 'Far']]) {
+      const list = treeXf.filter((t) => t[1] === far);
+      if (!list.length) continue;
+      for (const [geo, mat, name] of [[parts.green, greenMat, 'SnowTreesGreen'], [parts.snow, snowMat, 'SnowTreesSnow'], [parts.trunk, trunkMat, 'SnowTreesTrunk']]) {
+        const im = new THREE.InstancedMesh(geo, mat, list.length);
+        im.name = name + tag;
+        list.forEach(([mx], i) => im.setMatrixAt(i, mx));
+        im.instanceMatrix.needsUpdate = true; im.computeBoundingSphere(); group.add(im);
+      }
+    }
+    const m = new THREE.Matrix4(), sc = new THREE.Vector3(), pos = new THREE.Vector3();
+    for (let v = 0; v < 4; v++) {
+      const list = flakeXf.filter((f) => f[5] === v);
+      if (!list.length) continue;
+      const im = new THREE.InstancedMesh(createSnowflakeGeometry(v), iceMat, list.length);
+      im.name = 'IceSnowflakes' + v;
+      list.forEach(([x, y, z, q2, size], i) => im.setMatrixAt(i, m.compose(pos.set(x, y, z), q2, sc.setScalar(size))));
+      im.instanceMatrix.needsUpdate = true;
+      im.computeBoundingSphere();
+      group.add(im);
+    }
+    // all static soft blobs (shadows + window spills): one draw call per material
+    for (const [mat, { order, matrices }] of blobBatches) {
+      const im = new THREE.InstancedMesh(blobGeo, mat, matrices.length);
+      matrices.forEach((mx, i) => im.setMatrixAt(i, mx));
+      im.renderOrder = order; im.name = 'SoftBlobs';
+      im.instanceMatrix.needsUpdate = true; im.computeBoundingSphere(); group.add(im);
+    }
+  }
+
   // everything above is drawn by the main camera only (not by the ice reflection)
   group.traverse((o) => o.layers.set(EXTERIOR_LAYER));
   let tris = 0;
@@ -1354,15 +1622,18 @@ function createWinterScenery({ glow, renderer }) {
 
   return {
     group,
-    stats: { trees: TREES.length, cabins: CABINS.length, snowflakes: flakeXf.length, triangles: Math.round(tris) },
+    stats: { trees: treeXf.length, cabins: CABINS.length, snowflakes: flakeXf.length, reindeer: deers.length, triangles: Math.round(tris) },
     roses: roseRef,
-    layout: { trees: TREES, flakes: FLAKES, flakeXf: flakeXf.map(([x, y, z, , size, v]) => [x, y, z, size, v]), deer: [deerX, deerZ], cabins: CABINS.map((c) => at(c.theta, c.out)) },
+    layout: { trees: TREES, flakes: FLAKES, flakeXf: flakeXf.map(([x, y, z, , size, v]) => [x, y, z, size, v]), deer: [deerX, deerZ], deers: deers.map((D) => [D.obj.position.x, D.obj.position.z]), cabins: CABINS.map((c) => c.pos || at(c.theta, c.out)) },
     update(t) {
-      // reindeer: slow look around, soft nod, breathing
-      const h = deer.userData.head;
-      h.rotation.y = 0.3 * Math.sin(t * 0.35) + 0.08 * Math.sin(t * 0.9);
-      h.rotation.x = 0.05 * Math.sin(t * 0.7) - 0.03;
-      deer.children[0].scale.y = 1 + 0.01 * Math.sin(t * 2.1);
+      // reindeer (3): each turns slowly in place (own direction / speed / phase) + slow look around, soft nod, breathing
+      for (const D of deers) {
+        const o = D.obj, h = o.userData.head, u = t + D.phase;
+        o.rotation.y = D.base + D.dir * D.speed * t + D.phase;
+        h.rotation.y = 0.3 * Math.sin(u * 0.35) + 0.08 * Math.sin(u * 0.9);
+        h.rotation.x = 0.05 * Math.sin(u * 0.7) - 0.03;
+        o.children[0].scale.y = 1 + 0.01 * Math.sin(u * 2.1);
+      }
     },
   };
 }
@@ -1550,7 +1821,7 @@ function createIceRink({ renderer, glow, bulbs, reflectionScale = 0.5 }) {
   ring.holes.push(rinkShape(0, THREE.Path));
   const boardGeo = new THREE.ExtrudeGeometry(ring, { depth: RINK.boardHeight, bevelEnabled: false, curveSegments: 96 });
   boardGeo.rotateX(-Math.PI / 2);
-  const boardMat = glow.patch(new THREE.MeshStandardMaterial({ color: PALETTE.boards, roughness: 0.55 }), 1);
+  const boardMat = glow.patch(new THREE.MeshStandardMaterial({ color: CABIN_WOOD_COLOR, roughness: 0.55 }), 1);   // (2026-11-04) same wood colour as the cabin walls
   const boards = new THREE.Mesh(boardGeo, boardMat);
   boards.name = 'RinkBoards';
   group.add(boards);
@@ -3336,6 +3607,7 @@ class SkateFX {
 // shoulder/elbow joints, so joint names, lengths and axes are untouched. Hands meet at one shared
 // clasp point that is kept within both arms' reach, so connected hands never separate.
 
+const PS_MENU_RANGE = 6;      // her menu opens only when he is within this distance of her (2026-11-04: 3 → 6 m)
 const PS = {
   helpGap: 0.92,             // Help: root distance, facing each other (the big heads need the room)
   holdGap: 0.8,              // Hold Hands: root distance, side by side (she is on his right)
@@ -3464,40 +3736,133 @@ class PartnerSkating {
     const pill = [
       'padding:8px 16px', 'border-radius:999px', 'border:1px solid rgba(243,217,184,.45)',
       'background:rgba(6,12,26,.62)', 'color:#f3d9b8', 'cursor:pointer', 'white-space:nowrap',
-      'font:300 13px/1 "Helvetica Neue", Arial, sans-serif', 'letter-spacing:.08em',
+      'font:300 13px/1 "Helvetica Neue", Arial, sans-serif', 'letter-spacing:0',
       'backdrop-filter:blur(4px)', '-webkit-backdrop-filter:blur(4px)',
     ].join(';');
+    // one shared look for every contextual action pill: her radial menu items and the rose 줍기 button
+    this.pillStyle = pill + `;font-family:${HUD_FONT};letter-spacing:0;padding:10px 20px`;
+    // radial menu (2026-11-03): a zero-size anchor at her head; items are placed around it on a semicircle
+    this.radialItemStyle = this.pillStyle + ';position:absolute;left:0;top:0;pointer-events:auto;'
+      + 'opacity:0;transform:translate(-50%,-50%) scale(.6);transition:transform .3s cubic-bezier(.2,.9,.3,1.12), opacity .22s, filter .2s, color .2s, border-color .2s';
     const menu = document.createElement('div');
-    menu.style.cssText = 'position:fixed;left:0;top:0;z-index:11;display:none;gap:8px;transform:translate(-50%,-100%);pointer-events:auto';
-    for (const [label, mode] of [['Help', 'help'], ['Hold Hands', 'hold'], ['Dance', 'dance']]) {
+    menu.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;z-index:11;display:none;pointer-events:none';
+    for (const [label, mode] of [['도와주기', 'help'], ['손잡기', 'hold'], ['춤추기', 'dance']]) {
       const b = document.createElement('button');
       b.textContent = label;
-      b.style.cssText = pill;
+      b.style.cssText = this.radialItemStyle;
+      b.className = 'tap-pill radial-pill radial-item';
       b.addEventListener('pointerdown', (e) => e.stopPropagation());
-      b.addEventListener('click', (e) => { e.stopPropagation(); this.closeMenu(); this.start(mode); b.blur(); });
+      // (2026-11-03) he skates over to her first; the chosen interaction starts when he arrives
+      b.addEventListener('click', (e) => { e.stopPropagation(); this.closeMenu(); this.approach(mode); b.blur(); });
       menu.appendChild(b);
     }
     document.body.appendChild(menu);
     this.menu = menu;
 
     const letGo = document.createElement('button');
-    letGo.textContent = 'Let Go';
-    letGo.style.cssText = pill + ';position:fixed;left:50%;bottom:66px;transform:translateX(-50%);z-index:10;display:none';
+    letGo.textContent = '손 놓기';
+    // (2026-11-04) same pill as her radial-menu buttons (font, size, colour, padding, background, border, radius, states)
+    letGo.style.cssText = this.pillStyle + ';position:fixed;left:50%;bottom:calc(70px + env(safe-area-inset-bottom));transform:translateX(-50%);z-index:10;display:none';
+    letGo.className = 'tap-pill radial-pill';
     letGo.addEventListener('click', () => { this.cancel(); letGo.blur(); });
     document.body.appendChild(letGo);
     this.letGo = letGo;
   }
 
-  openMenu() { this.menu.style.display = 'flex'; this.menuOpen = true; this._placeMenu(); }
-  closeMenu() { this.menu.style.display = 'none'; this.menuOpen = false; }
-
+  // radial menu: open = items fan out from her head onto the arc; close = they fold back in and hide
+  openMenu() {
+    clearTimeout(this._menuHide);
+    this.menu.style.display = 'block';
+    this.menuOpen = true;
+    this._layoutMenu(this._headOnScreen().r);
+    this._placeMenu();
+    const items = [...this.menu.children];
+    for (const b of items) { b.style.transitionDelay = '0ms'; b.style.transform = 'translate(-50%,-50%) scale(.6)'; b.style.opacity = '0'; }
+    void this.menu.offsetWidth;                                      // start the fan-out from the centre
+    items.forEach((b, i) => {
+      b.style.pointerEvents = 'auto';
+      b.style.transitionDelay = `${i * 35}ms`;
+      b.style.transform = `translate(-50%,-50%) translate(${b._rx}px,${b._ry}px)`;
+      b.style.opacity = '1';
+    });
+  }
+  closeMenu() {
+    const was = this.menuOpen;
+    this.menuOpen = false;
+    if (!was) return;
+    for (const b of this.menu.children) {
+      b.style.transitionDelay = '0ms'; b.style.pointerEvents = 'none';
+      b.style.transform = 'translate(-50%,-50%) scale(.6)'; b.style.opacity = '0';
+    }
+    clearTimeout(this._menuHide);
+    this._menuHide = setTimeout(() => { if (!this.menuOpen) this.menu.style.display = 'none'; }, 220);
+  }
+  // items on an even semicircular arc around her head (left → right), as small as it can be: it grows only until no
+  // two pills touch (6 px gap) and every pill clears her head (its on-screen radius), so it hugs head and shoulders
+  _layoutMenu(headR = 36) {
+    const items = [...this.menu.children], n = items.length;
+    const sz = items.map((b) => [b.offsetWidth / 2, b.offsetHeight / 2]);
+    // (2026-11-04) 150° … 30°, evenly spread (40° apart for four): the end buttons sit further in, the arc rides a
+    // little higher above her head (more clearance, slightly rounder)
+    const A0 = Math.PI * 150 / 180, A1 = Math.PI * 30 / 180;
+    const ang = items.map((_, i) => (n > 1 ? A0 - ((A0 - A1) * i) / (n - 1) : Math.PI / 2));
+    const FLAT = 0.8, GAP = 6, CLEAR = 14;
+    const fits = (R) => {
+      const P = ang.map((a) => [R * Math.cos(a), -R * FLAT * Math.sin(a)]);
+      for (let i = 0; i < n; i++) {
+        const [x, y] = P[i], [w, h] = sz[i];
+        if (Math.hypot(Math.max(Math.abs(x) - w, 0), Math.max(Math.abs(y) - h, 0)) < headR + CLEAR) return null;
+        for (let j = i + 1; j < n; j++) {
+          const [x2, y2] = P[j], [w2, h2] = sz[j];
+          if (Math.abs(x - x2) < w + w2 + GAP && Math.abs(y - y2) < h + h2 + GAP) return null;
+        }
+      }
+      return P;
+    };
+    let R = 40, P = null;
+    while (R < 320 && !(P = fits(R))) R += 2;
+    P = P || fits(320) || ang.map((a) => [320 * Math.cos(a), -320 * FLAT * Math.sin(a)]);
+    const ext = { l: 0, r: 0, t: 0, b: 0 };
+    items.forEach((b, i) => {
+      b._rx = Math.round(P[i][0]); b._ry = Math.round(P[i][1]);
+      const [w, h] = sz[i];
+      ext.l = Math.min(ext.l, b._rx - w); ext.r = Math.max(ext.r, b._rx + w);
+      ext.t = Math.min(ext.t, b._ry - h); ext.b = Math.max(ext.b, b._ry + h);
+    });
+    this._menuExt = ext;
+    this._menuHeadR = headR;
+  }
+  // her head on screen: centre + radius (from the head meshes' bounds, measured once in head space)
+  _headOnScreen() {
+    const head = this.R.head;
+    if (!this._headLocal) {
+      head.updateWorldMatrix(true, true);
+      const box = new THREE.Box3().setFromObject(head), size = box.getSize(new THREE.Vector3());
+      // radius = half the head's largest extent (hair + earmuffs), not the box's diagonal, so the arc hugs the head
+      this._headLocal = { c: head.worldToLocal(box.getCenter(new THREE.Vector3())), r: Math.max(size.x, size.y, size.z) / 2 / head.getWorldScale(new THREE.Vector3()).x };
+    }
+    const c = head.localToWorld(this._headLocal.c.clone()), rW = this._headLocal.r * head.getWorldScale(new THREE.Vector3()).x;
+    const side = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 0).multiplyScalar(rW).add(c);
+    const r = this.dom.getBoundingClientRect(), toPx = (v) => { const q = v.project(this.camera); return [r.left + (q.x * 0.5 + 0.5) * r.width, r.top + (-q.y * 0.5 + 0.5) * r.height, q.z]; };
+    const [x, y, z] = toPx(c.clone()), [sx, sy] = toPx(side);
+    return { x, y, z, r: Math.hypot(sx - x, sy - y) };
+  }
   _placeMenu() {
     if (!this.menuOpen) return;
-    const p = this.R.root.localToWorld(new THREE.Vector3(0, 2.05, 0)).project(this.camera);
-    if (p.z > 1) { this.closeMenu(); return; }
-    const r = this.dom.getBoundingClientRect();
-    this.menu.style.left = `${r.left + (p.x * 0.5 + 0.5) * r.width}px`;
-    this.menu.style.top = `${r.top + (-p.y * 0.5 + 0.5) * r.height}px`;
+    if (this._distToHer() > PS_MENU_RANGE + 0.4) { this.closeMenu(); return; }   // he skated away: fold it up
+    const H = this._headOnScreen();
+    if (H.z > 1) { this.closeMenu(); return; }
+    if (Math.abs(H.r - this._menuHeadR) > 6) {                        // zoomed in / out: refit the arc around her head
+      this._layoutMenu(H.r);
+      for (const b of this.menu.children) b.style.transform = `translate(-50%,-50%) translate(${b._rx}px,${b._ry}px)`;
+    }
+    let x = H.x, y = H.y;
+    // keep the whole arc on screen (clear of the top HUD row and the bottom action bar)
+    const E = this._menuExt || { l: 0, r: 0, t: 0, b: 0 }, m = 8, top = 60, bottom = 84;
+    x = Math.min(Math.max(x, m - E.l), innerWidth - m - E.r);
+    y = Math.min(Math.max(y, top - E.t), innerHeight - bottom - E.b);
+    this.menu.style.left = `${x}px`;
+    this.menu.style.top = `${y}px`;
   }
 
   // canvas tap (from PointerControls): true = consumed (no click-to-move)
@@ -3505,8 +3870,18 @@ class PartnerSkating {
     if (this.menuOpen) { this.closeMenu(); return true; }
     if (this.mode === 'dance') return true;                      // input paused during the performance
     if (this.player.trick || this.player.spin) return false;
-    if (raycaster.intersectObject(this.pick, false).length) { this.openMenu(); return true; }
+    if (raycaster.intersectObject(this.pick, false).length) {
+      // (2026-11-03) her menu only opens when he is within 3 m; from farther away the tap is a normal
+      // tap-to-move, so he simply skates toward her
+      if (this._distToHer() > PS_MENU_RANGE) return false;
+      this.openMenu();
+      return true;
+    }
     return false;
+  }
+  _distToHer() {
+    const a = this.player.mesh.position, b = this.R.root.position;
+    return Math.hypot(a.x - b.x, a.z - b.z);
   }
 
   // ---------------- state ----------------
@@ -3526,7 +3901,45 @@ class PartnerSkating {
     }
   }
 
+  // (2026-11-03) he skates over to her, then the chosen interaction starts (she no longer comes to him). The spot is
+  // where the existing formation puts her: in front of him (Help / Dance) or on his right (Hold Hands). Uses his
+  // normal tap-to-move steering; WASD, a new tap, Spin / Triple Axel or the proposal cancel the approach.
+  approach(mode) {
+    const P = this.player;
+    if (P.trick || P.spin || this.mode === 'dance' || this.mode === mode) return;
+    if (this.mode) this.cancel();                                  // switching from Help to Hold Hands (or back)
+    this.pending = { mode, t: 0 };
+    this._aimApproach();
+    const p = P.mesh.position, T = this.pending.at;
+    if (Math.hypot(T.x - p.x, T.y - p.z) < 0.4) { this.pending = null; this.start(mode); return; }   // already there
+    P.target = T.clone(); P._best = Infinity; P._stuck = 0; P.glideOut = false;
+    this.pending.target = P.target;
+  }
+  _aimApproach() {
+    const P = this.player, her = this.R.root.position, m = P.mesh.position, mode = this.pending.mode;
+    let dx = her.x - m.x, dz = her.z - m.z;
+    const d = Math.hypot(dx, dz) || 1; dx /= d; dz /= d;
+    const h = Math.atan2(dx, dz);                                    // he arrives heading toward her
+    let tx, tz;
+    if (mode === 'hold') { tx = her.x + PS.holdGap * Math.cos(h); tz = her.z - PS.holdGap * Math.sin(h); }   // she ends on his right
+    else { const g = mode === 'help' ? PS.helpGap : PS.face; tx = her.x - dx * g; tz = her.z - dz * g; }   // she ends in front of him
+    const q = new THREE.Vector3(tx, 0, tz);
+    this._clampIce(q);
+    this.pending.at = new THREE.Vector2(q.x, q.z);
+  }
+  _updateApproach(dt) {
+    const A = this.pending, P = this.player;
+    if (!A) return;
+    A.t += dt;
+    if (P.target && P.target === A.target) return;                 // still skating over
+    const p = P.mesh.position;
+    const arrived = !P.target && Math.hypot(A.at.x - p.x, A.at.y - p.z) < 0.6;
+    this.pending = null;
+    if (arrived && !P.trick && !P.spin) this.start(A.mode);           // there: the interaction begins as before
+  }
+
   cancel() {                                                     // Help / Hold Hands → let go
+    this.pending = null;                                         // (also stops an approach in progress)
     if (this.mode !== 'help' && this.mode !== 'hold') return;
     this.mode = null;
     this.H.locked = false;
@@ -3545,6 +3958,7 @@ class PartnerSkating {
   // called after player.update()
   postUpdate(dt) {
     if (this.mode !== 'dance') this._follow(dt);
+    this._updateApproach(dt);
     this._placeMenu();
   }
 
@@ -3929,38 +4343,43 @@ class PartnerSkating {
 const STORY_UI = (() => {
   const font = 'font:300 clamp(11px, 3vw, 13px)/1.35 "Helvetica Neue", Arial, sans-serif';
   const counter = document.createElement('div');
-  counter.style.cssText = [
-    'position:fixed', 'top:40px', 'right:12px', 'z-index:12', 'pointer-events:none', 'display:flex', 'align-items:center',
-    'gap:6px', 'padding:4px 11px 4px 7px', 'border-radius:999px', 'background:rgba(6,12,26,.55)', 'color:#f6f1e7', font,
-    'letter-spacing:.08em', 'backdrop-filter:blur(4px)', '-webkit-backdrop-filter:blur(4px)', 'transition:transform .25s',
+  counter.style.cssText = [                                         // sits in the top-right HUD row (next to the volume)
+    'pointer-events:none', 'display:flex', 'align-items:center', 'box-sizing:border-box', 'height:34px',
+    'gap:6px', 'padding:0 12px 0 9px', 'border-radius:999px', 'background:rgba(6,12,26,.55)', 'color:#f6f1e7', font,
+    'border:1px solid rgba(246,241,231,.16)',
+    'letter-spacing:0', 'backdrop-filter:blur(4px)', '-webkit-backdrop-filter:blur(4px)', 'transition:transform .25s',
   ].join(';');
-  // icon (2026-11-03): a white rose bud seen from above — layered petals spiralling in, green leaf tips at the sides
-  counter.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M0.8 12.6c1.8-2.6 4.2-3 6-1.5-1.3 2.2-3.6 2.8-6 1.5z" fill="#7fae86"/>
-      <path d="M23.2 11.4c-1.8 2.6-4.2 3-6 1.5 1.3-2.2 3.6-2.8 6-1.5z" fill="#7fae86"/>
-      <g fill="#f5f1ea" stroke="#cdc4b8" stroke-width=".6"><circle cx="12.00" cy="8.30" r="3.9"/><circle cx="15.52" cy="10.86" r="3.9"/><circle cx="14.17" cy="14.99" r="3.9"/><circle cx="9.83" cy="14.99" r="3.9"/><circle cx="8.48" cy="10.86" r="3.9"/></g>
-      <g fill="#faf7f2" stroke="#d3cbc0" stroke-width=".55"><circle cx="13.41" cy="10.59" r="2.7"/><circle cx="13.41" cy="13.41" r="2.7"/><circle cx="10.59" cy="13.41" r="2.7"/><circle cx="10.59" cy="10.59" r="2.7"/></g>
-      <circle cx="12" cy="12" r="1.9" fill="#fdfcf9" stroke="#cbc2b6" stroke-width=".55"/>
-      <path d="M11.3 11.5c.5-.6 1.5-.5 1.7.3" stroke="#c4bbae" stroke-width=".55" fill="none" stroke-linecap="round"/>
+  // icon (2026-11-03, after the user's reference): minimal white line rose bud seen from above — overlapping outer
+  // petals, one curled inner petal, a spiral centre; outlines only (no fill, no leaves); a little larger than the speaker
+  counter.innerHTML = `<svg width="23" height="23" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="#f6f1e7"
+      stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M19.39 12 L19.18 12.31 L18.98 12.61 L19.14 12.94 L19.28 13.28 L19.4 13.64 L19.49 14.01 L19.55 14.38 L19.59 14.76 L19.6 15.15 L19.58 15.53 L19.53 15.92 L19.45 16.3 L19.35 16.68 L19.21 17.05 L19.05 17.41 L18.86 17.75 L18.64 18.08 L18.4 18.4 L18.13 18.69 L17.85 18.97 L17.54 19.22 L17.21 19.45 L16.87 19.65 L16.52 19.82 L16.15 19.97 L15.77 20.09 L15.39 20.18 L15 20.24 L14.61 20.27 L14.22 20.27 L13.83 20.24 L13.44 20.18 L13.07 20.1 L12.7 19.99 L12.34 19.85 L12 19.69 L11.67 19.5 L11.36 19.29 L11.07 19.07 L10.73 19.2 L10.38 19.33 L10.01 19.43 L9.63 19.5 L9.25 19.55 L8.87 19.56 L8.48 19.55 L8.09 19.51 L7.71 19.43 L7.33 19.33 L6.96 19.2 L6.6 19.04 L6.25 18.85 L5.92 18.64 L5.6 18.4 L5.31 18.13 L5.03 17.85 L4.78 17.54 L4.55 17.21 L4.35 16.87 L4.18 16.52 L4.03 16.15 L3.92 15.77 L3.83 15.38 L3.78 14.99 L3.75 14.6 L3.75 14.21 L3.79 13.82 L3.85 13.44 L3.94 13.06 L4.06 12.69 L4.21 12.34 L4.38 12 L4.58 11.68 L4.78 11.37 L4.62 11.03 L4.49 10.68 L4.38 10.31 L4.29 9.94 L4.24 9.55 L4.2 9.16 L4.2 8.77 L4.23 8.38 L4.28 7.98 L4.37 7.59 L4.48 7.21 L4.62 6.83 L4.79 6.47 L4.99 6.12 L5.21 5.78 L5.46 5.46 L5.73 5.16 L6.02 4.88 L6.34 4.62 L6.67 4.39 L7.02 4.18 L7.38 4 L7.76 3.85 L8.14 3.73 L8.53 3.63 L8.93 3.57 L9.33 3.53 L9.73 3.53 L10.13 3.55 L10.52 3.61 L10.91 3.69 L11.28 3.8 L11.65 3.93 L12 4.09 L12.34 4.27 L12.66 4.48 L12.96 4.7 L13.28 4.72 L13.64 4.59 L14.01 4.49 L14.39 4.42 L14.77 4.38 L15.16 4.36 L15.55 4.38 L15.94 4.43 L16.33 4.51 L16.7 4.62 L17.07 4.75 L17.43 4.92 L17.78 5.12 L18.1 5.34 L18.41 5.59 L18.7 5.86 L18.97 6.15 L19.21 6.46 L19.43 6.8 L19.62 7.14 L19.78 7.51 L19.92 7.88 L20.02 8.26 L20.09 8.65 L20.13 9.04 L20.14 9.43 L20.12 9.82 L20.07 10.21 L19.99 10.59 L19.88 10.96 L19.74 11.32 L19.58 11.67Z"/>
+      <path d="M12.57 6.53 Q11.47 4.92 12.41 4.51 M17.47 12.57 Q19.08 11.47 19.49 12.41 M11.33 17.46 Q12.41 19.09 11.46 19.48 M6.54 11.33 Q4.91 12.41 4.52 11.46"/>
+      <path d="M7.98 13.77A4.6 4.6 0 1 1 12.7 16.78"/>
+      <path d="M11.98 11.31 L12.11 11.25 L12.26 11.22 L12.42 11.21 L12.59 11.25 L12.76 11.31 L12.91 11.42 L13.05 11.56 L13.17 11.73 L13.25 11.93 L13.29 12.16 L13.29 12.39 L13.24 12.63 L13.14 12.86 L12.99 13.08 L12.8 13.27 L12.56 13.43 L12.3 13.54 L12 13.6 L11.69 13.6 L11.38 13.54 L11.08 13.42 L10.79 13.24 L10.54 13 L10.34 12.71 L10.19 12.38 L10.1 12.02 L10.08 11.64 L10.14 11.25 L10.27 10.87 L10.48 10.51 L10.75 10.2 L11.09 9.93 L11.48 9.73 L11.91 9.61 L12.37 9.56 L12.83 9.61 L13.29 9.74 L13.72 9.97 L14.11 10.27 L14.44 10.65"/>
     </svg><span>0/10</span>`;
+  counter.className = 'hud-count';
   const label = counter.querySelector('span');
   const toast = document.createElement('div');
   toast.style.cssText = [
     'position:fixed', 'left:50%', 'top:14px', 'transform:translate(-50%,-8px)', 'z-index:13', 'pointer-events:none',
-    'max-width:min(84vw, 440px)', 'text-align:center', 'padding:9px 18px', 'border-radius:999px', 'background:rgba(6,12,26,.74)',
-    'color:#f7f2e8', font, 'letter-spacing:.05em', 'opacity:0', 'transition:opacity .5s, transform .5s',
+    'max-width:min(84vw, 440px)', 'text-align:center', 'padding:10px 18px', 'border-radius:14px', 'background:rgba(6,12,26,.74)',   // rounded rectangle
+    'color:#f7f2e8', font, 'letter-spacing:0', 'opacity:0', 'transition:opacity .5s, transform .5s',
     'border:1px solid rgba(247,242,232,.35)', 'backdrop-filter:blur(4px)', '-webkit-backdrop-filter:blur(4px)',
   ].join(';');
   let timer = 0;
   return {
-    mount() { document.body.appendChild(counter); document.body.appendChild(toast); },
+    mount(parent = document.body) { parent.appendChild(counter); document.body.appendChild(toast); },
     setCount(n, total) {
       label.textContent = `${n}/${total}`;
       counter.style.transform = 'scale(1.12)';
       setTimeout(() => { counter.style.transform = 'scale(1)'; }, 220);
     },
-    toast(text, seconds = 3) {
+    toast(text, seconds = 3, { letterSpacing = '0' } = {}) {
       toast.textContent = text;
+      toast.style.letterSpacing = letterSpacing;
+      toast.style.top = innerWidth < 640 ? 'calc(96px + env(safe-area-inset-top))'    // narrow screens: below the HUD + FPS
+        : 'calc(14px + env(safe-area-inset-top))';
       toast.style.opacity = '1';
       toast.style.transform = 'translate(-50%,0)';
       clearTimeout(timer);
@@ -3993,10 +4412,11 @@ class RoseCollector {
     this.grows = [];                      // respawned roses growing back in
     this.anims = [];
     this.sel = -1;
-    // contextual "Pick Up" button, placed over the selected rose
+    // contextual "줍기" (pick up) button, placed over the selected rose
     const b = document.createElement('button');
-    b.textContent = 'Pick Up';
+    b.textContent = '줍기';
     b.style.cssText = pillStyle + ';position:fixed;left:0;top:0;z-index:11;display:none;transform:translate(-50%,-100%)';
+    b.className = 'tap-pill radial-pill';                        // same look as her radial-menu buttons
     b.addEventListener('pointerdown', (e) => e.stopPropagation());
     b.addEventListener('click', (e) => { e.stopPropagation(); b.blur(); if (this.sel >= 0) this.collect(this.sel); });
     document.body.appendChild(b);
@@ -4056,6 +4476,7 @@ class RoseCollector {
     const r = this.dom.getBoundingClientRect();
     this.btn.style.left = `${r.left + (p.x * 0.5 + 0.5) * r.width}px`;
     this.btn.style.top = `${r.top + (-p.y * 0.5 + 0.5) * r.height - 6}px`;
+    uiKeepOnScreen(this.btn);
   }
   collect(i) {
     this.close();
@@ -4466,10 +4887,10 @@ class ProposalSequence {
     this.renderer.toneMappingExposure = e;
     // the characters keep roughly their normal look (their own soft fill makes up for the darker exposure)
     const w = t < T.SNAP ? 0 : sm(T.SNAP, T.LIT, t) * (1 - sm(T.END, T.OUT, t));
-    const soft = new THREE.Color(1.0, 0.9, 0.78).multiplyScalar(1.05);   // spotlight on the characters
+    const soft = new THREE.Color(1.0, 0.9, 0.78).multiplyScalar(1.05 * 1.3);   // spotlight on the characters (+30%)
     this.fills.forEach((u, i) => u.value.copy(this.saved.fills[i]).lerp(soft, w));
     this.poolMat.opacity = 0.7 * w;
-    this.coneMat.uniforms.uOpacity.value = 0.14 * w;            // soft, restrained
+    this.coneMat.uniforms.uOpacity.value = 0.14 * 1.3 * w;      // soft, restrained (+30%)
     if (this.snow) this.snow.setProposal(w, this.snapped ? this.mid : null);   // gentle snow through the light
     if (this.snapped) {
       this.cone.visible = w > 0.001;
@@ -4533,6 +4954,384 @@ class ProposalSequence {
   }
 }
 
+// ===== ui/hud.js =====
+// keep an absolutely placed element (left/top in px, already set) fully on screen, clear of the HUD rows
+function uiKeepOnScreen(el, { margin = 8, top = 56, bottom = 76 } = {}) {
+  const r = el.getBoundingClientRect();
+  if (!r.width) return;
+  const W = innerWidth, H = innerHeight;
+  let dx = 0, dy = 0;
+  if (r.left < margin) dx = margin - r.left; else if (r.right > W - margin) dx = W - margin - r.right;
+  if (r.top < top) dy = top - r.top; else if (r.bottom > H - bottom) dy = H - bottom - r.bottom;
+  if (dx) el.style.left = `${parseFloat(el.style.left) + dx}px`;
+  if (dy) el.style.top = `${parseFloat(el.style.top) + dy}px`;
+}
+// Top HUD (2026-11-03): top-left = room / server info, top-right = volume + white-rose counter.
+// Fonts: Pretendard (loaded in <head>), with system Korean fallbacks.
+const HUD_FONT = '"Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", sans-serif';
+const HUD_GLASS = ['background:rgba(6,12,26,.55)', 'border:1px solid rgba(246,241,231,.16)', 'color:#f6f1e7',
+  'backdrop-filter:blur(8px)', '-webkit-backdrop-filter:blur(8px)'].join(';');
+
+// ---- game audio: one master volume for every game sound -------------------------------------------------
+// The game has no sounds yet. Any sound added later connects to GameAudio.output (Web Audio) so the HUD volume
+// control applies to it automatically. Volume / mute are remembered in this browser.
+const GameAudio = (() => {
+  let ctx = null, master = null, volume = 0.8, muted = false;
+  try {
+    const s = JSON.parse(localStorage.getItem('rink.audio') || 'null');
+    if (s && typeof s.volume === 'number') { volume = Math.min(1, Math.max(0, s.volume)); muted = !!s.muted; }
+  } catch (e) { /* storage unavailable: defaults */ }
+  const save = () => { try { localStorage.setItem('rink.audio', JSON.stringify({ volume, muted })); } catch (e) { /* ignore */ } };
+  const apply = () => { if (master) master.gain.setTargetAtTime(muted ? 0 : volume, ctx.currentTime, 0.03); };
+  const subs = new Set();
+  const changed = () => { apply(); save(); subs.forEach((fn) => fn()); };
+  return {
+    get volume() { return volume; },
+    get muted() { return muted; },
+    get level() { return muted ? 0 : volume; },                      // what actually reaches the speakers
+    setVolume(v) { volume = Math.min(1, Math.max(0, v)); if (volume > 0) muted = false; changed(); },
+    setMuted(m) { muted = !!m; changed(); },
+    subscribe(fn) { subs.add(fn); return () => subs.delete(fn); },
+    // future game sounds: source.connect(GameAudio.output)
+    get output() {
+      if (!ctx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        ctx = new AC(); master = ctx.createGain(); master.gain.value = muted ? 0 : volume; master.connect(ctx.destination);
+      }
+      return master;
+    },
+    get context() { return this.output && ctx; },
+    resume() { if (ctx && ctx.state === 'suspended') ctx.resume(); },
+  };
+})();
+
+// ---- multiplayer rooms: NOT CONNECTED YET ---------------------------------------------------------------
+// This project has no multiplayer backend. The server pill and popup read everything from this object, so a real
+// backend only has to fill it in:
+//   connected = true, currentRoomId, rooms = [{ id, name, players, capacity }] (live counts from the server),
+//   refresh(): reload rooms + counts, join(id): move this player to room id (resolve true on success),
+//   then call notify() whenever the data changes.
+// Until then the HUD shows the real local state: offline, 1 player (you), no rooms.
+const ROOM_SERVICE = {
+  connected: false,
+  currentRoomId: null,
+  rooms: [],
+  async refresh() { /* TODO(backend): fetch the room list with live player counts */ this.notify(); },
+  async join(id) { /* TODO(backend): move this player to room `id` */ return false; },
+  get playersHere() {
+    if (!this.connected) return 1;                                   // offline: only you, in this browser
+    const r = this.rooms.find((x) => x.id === this.currentRoomId);
+    return r ? r.players : null;
+  },
+  _subs: new Set(),
+  subscribe(fn) { this._subs.add(fn); return () => this._subs.delete(fn); },
+  notify() { this._subs.forEach((fn) => fn()); },
+};
+
+const HUD_ICONS = {
+  chevron: '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  close: '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  speaker: (level) => `<svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 9.5h3.2L12 5.5v13l-4.8-4H4z"/>
+      ${level <= 0 ? '<path d="M16 9.5l5 5M21 9.5l-5 5"/>' : '<path d="M15.6 9.2a4 4 0 0 1 0 5.6"/>'}
+      ${level > 0.5 ? '<path d="M18.2 6.8a7.4 7.4 0 0 1 0 10.4"/>' : ''}</svg>`,
+};
+
+function createTopHud({ toast } = {}) {
+  const css = (el, rules) => { el.style.cssText = rules.join(';'); return el; };
+  const btnReset = ['appearance:none', 'margin:0', 'cursor:pointer', 'font-family:inherit'];
+  // ---------- top-left: players in this room + chevron → server popup ----------
+  const left = css(document.createElement('div'), ['position:fixed', 'top:calc(12px + env(safe-area-inset-top))',
+    'left:calc(12px + env(safe-area-inset-left))', 'z-index:14', `font-family:${HUD_FONT}`]);
+  const pill = css(document.createElement('button'), [...btnReset, HUD_GLASS, 'display:flex', 'align-items:center', 'gap:7px',
+    'height:34px', 'padding:0 11px 0 12px', 'border-radius:999px', 'font-size:14px', 'font-weight:600', 'letter-spacing:0']);
+  pill.className = 'hud-btn';
+  pill.setAttribute('aria-haspopup', 'dialog');
+  pill.setAttribute('aria-expanded', 'false');
+  pill.innerHTML = '<span data-dot style="width:7px;height:7px;border-radius:50%"></span><span data-n></span><span data-chev style="display:flex;opacity:.75;transition:transform .2s">' + HUD_ICONS.chevron + '</span>';
+  left.appendChild(pill);
+  const pop = css(document.createElement('div'), [HUD_GLASS, 'position:absolute', 'top:48px', 'left:0', 'display:none',
+    'width:min(380px, calc(100vw - 24px - env(safe-area-inset-left) - env(safe-area-inset-right)))',
+    'max-height:calc(100dvh - 80px - env(safe-area-inset-top) - env(safe-area-inset-bottom))', 'overflow:auto', 'box-sizing:border-box',
+    'padding:20px 18px 18px', 'border-radius:22px', 'background:rgba(10,16,30,.78)', 'box-shadow:0 18px 40px rgba(0,0,0,.35)']);
+  pop.className = 'hud-pop';
+  pop.setAttribute('role', 'dialog');
+  pop.setAttribute('aria-label', '링크 서버');
+  left.appendChild(pop);
+  const render = () => {
+    const S = ROOM_SERVICE, n = S.playersHere;
+    pill.querySelector('[data-dot]').style.background = S.connected ? '#6fd28c' : '#8a93a6';
+    pill.querySelector('[data-n]').textContent = n == null ? '–' : String(n);
+    pill.title = S.connected ? `이 방의 접속 인원 ${n ?? '–'}명` : '오프라인 · 지금은 혼자 플레이 중이에요';
+    pill.setAttribute('aria-label', S.connected ? `접속 인원 ${n ?? '알 수 없음'}명, 서버 목록 열기` : '오프라인, 1명(나), 서버 목록 열기');
+    const cur = S.rooms.find((r) => r.id === S.currentRoomId);
+    const cards = S.rooms.map((r) => {
+      const isCur = r.id === S.currentRoomId, full = r.players >= r.capacity;
+      return `<button data-room="${r.id}" ${isCur || full ? 'disabled' : ''} style="${[...btnReset, 'text-align:left', 'padding:13px 14px',
+        'border-radius:14px', 'color:#f6f1e7', isCur ? 'background:rgba(243,217,184,.14)' : 'background:rgba(255,255,255,.05)',
+        isCur ? 'border:1px solid rgba(243,217,184,.75)' : 'border:1px solid rgba(246,241,231,.14)', full && !isCur ? 'opacity:.45' : '',
+        isCur || full ? 'cursor:default' : ''].join(';')}">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;font-size:14px;font-weight:600;letter-spacing:0">
+            <span>${r.name}</span>${isCur ? '<span style="font-size:11px;font-weight:600;color:#f3d9b8">현재 방</span>' : ''}</div>
+          <div style="margin-top:6px;font-size:13px;opacity:.72">${full && !isCur ? '가득 참 · ' : ''}${r.players} / ${r.capacity}명</div>
+        </button>`;
+    }).join('');
+    pop.innerHTML = `
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">
+        <div style="font-size:19px;font-weight:700;letter-spacing:0">링크 서버</div>
+        <button data-close aria-label="닫기" style="${[...btnReset, 'width:34px', 'height:34px', 'flex:none', 'display:flex', 'align-items:center',
+          'justify-content:center', 'border-radius:50%', 'color:#f6f1e7', 'background:rgba(255,255,255,.06)', 'border:1px solid rgba(243,217,184,.6)'].join(';')}">${HUD_ICONS.close}</button>
+      </div>
+      <div style="margin-top:8px;font-size:13px;opacity:.78;letter-spacing:0">어느 서버에서도 같은 아이스링크를 이용할 수 있어요.</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-top:18px;font-size:13px">
+        <span style="opacity:.85">현재 · ${S.connected ? (cur ? cur.name : '–') : '오프라인 (혼자 플레이 중)'}</span>
+        <button data-refresh ${S.connected ? '' : 'disabled'} style="${[...btnReset, 'padding:4px 0', 'border:0', 'background:none', 'color:#f6f1e7',
+          'font-size:13px', 'font-weight:600', S.connected ? '' : 'opacity:.35;cursor:default'].join(';')}">인원 새로고침</button>
+      </div>
+      ${S.connected
+        ? `<div style="margin-top:6px;font-size:11.5px;opacity:.6">표시된 인원은 실제 접속자 수예요.</div>
+           <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(140px, 1fr));gap:10px;margin-top:14px">${cards}</div>`
+        : `<div style="margin-top:14px;padding:18px 16px;border-radius:14px;border:1px dashed rgba(246,241,231,.22);font-size:13px;line-height:1.6;opacity:.8">
+             멀티플레이 서버가 아직 연결되지 않았어요.<br>서버가 준비되면 이곳에 방 목록과 실제 접속 인원이 표시돼요.</div>`}`;
+  };
+  const isOpen = () => pop.style.display !== 'none';
+  const setOpen = (o) => {
+    pop.style.display = o ? 'block' : 'none';
+    pill.setAttribute('aria-expanded', String(o));
+    pill.querySelector('[data-chev]').style.transform = o ? 'rotate(180deg)' : 'none';
+    if (o) { render(); if (ROOM_SERVICE.connected) ROOM_SERVICE.refresh(); }
+  };
+  pill.addEventListener('click', () => { setOpen(!isOpen()); pill.blur(); });
+  pop.addEventListener('click', async (e) => {
+    if (e.target.closest('[data-close]')) { setOpen(false); return; }
+    if (e.target.closest('[data-refresh]') && ROOM_SERVICE.connected) { ROOM_SERVICE.refresh(); return; }
+    const card = e.target.closest('[data-room]');
+    if (!card || card.disabled) return;
+    const id = card.getAttribute('data-room');
+    card.disabled = true; card.style.opacity = '.6';
+    const ok = await ROOM_SERVICE.join(ROOM_SERVICE.rooms.find((r) => String(r.id) === id)?.id ?? id);
+    if (!ok && toast) toast('서버를 옮기지 못했어요. 잠시 후 다시 시도해 주세요.', 3);
+    render();
+  });
+  ROOM_SERVICE.subscribe(render);
+  render();
+
+  // ---------- top-right: volume + white-rose counter ----------
+  const right = css(document.createElement('div'), ['position:fixed', 'top:calc(12px + env(safe-area-inset-top))',
+    'right:calc(12px + env(safe-area-inset-right))', 'z-index:14', 'display:flex',
+    'align-items:center', 'gap:8px', `font-family:${HUD_FONT}`]);
+  const volWrap = css(document.createElement('div'), ['position:relative']);
+  const spk = css(document.createElement('button'), [...btnReset, HUD_GLASS, 'width:34px', 'height:34px', 'padding:0', 'display:flex',
+    'align-items:center', 'justify-content:center', 'border-radius:50%']);
+  spk.className = 'hud-btn';
+  spk.setAttribute('aria-haspopup', 'true');
+  spk.setAttribute('aria-expanded', 'false');
+  const vol = css(document.createElement('div'), [HUD_GLASS, 'position:absolute', 'top:48px', 'right:0', 'display:none', 'align-items:center',
+    'gap:10px', 'padding:10px 14px 10px 10px', 'border-radius:16px', 'background:rgba(10,16,30,.78)', 'white-space:nowrap']);
+  vol.className = 'hud-vol';
+  vol.innerHTML = `<button data-mute style="${[...btnReset, 'width:30px', 'height:30px', 'padding:0', 'display:flex', 'align-items:center',
+      'justify-content:center', 'border:0', 'border-radius:50%', 'background:rgba(255,255,255,.08)', 'color:#f6f1e7'].join(';')}"></button>
+    <input data-slider type="range" min="0" max="100" step="1" aria-label="게임 볼륨"
+      style="width:min(150px, 38vw);accent-color:#f3d9b8;cursor:pointer;margin:0;touch-action:none">
+    <span data-pct style="min-width:36px;text-align:right;font-size:13px;font-weight:600;letter-spacing:0"></span>`;
+  volWrap.appendChild(spk); volWrap.appendChild(vol);
+  right.appendChild(volWrap);
+  const slider = vol.querySelector('[data-slider]'), pct = vol.querySelector('[data-pct]'), mute = vol.querySelector('[data-mute]');
+  const renderVol = () => {
+    const lv = GameAudio.level, p = Math.round(GameAudio.volume * 100);
+    spk.innerHTML = HUD_ICONS.speaker(lv);
+    mute.innerHTML = HUD_ICONS.speaker(lv);
+    spk.setAttribute('aria-label', `볼륨 ${GameAudio.muted ? '음소거' : p + '%'} · 조절 열기`);
+    mute.setAttribute('aria-label', GameAudio.muted ? '소리 켜기' : '음소거');
+    if (document.activeElement !== slider) slider.value = String(GameAudio.muted ? 0 : p);
+    pct.textContent = GameAudio.muted ? '음소거' : `${p}%`;
+  };
+  GameAudio.subscribe(renderVol);
+  renderVol();
+  const volOpen = () => vol.style.display !== 'none';
+  const setVolOpen = (o) => { vol.style.display = o ? 'flex' : 'none'; spk.setAttribute('aria-expanded', String(o)); };
+  spk.addEventListener('click', () => { setVolOpen(!volOpen()); GameAudio.resume(); spk.blur(); });
+  slider.addEventListener('input', () => { GameAudio.setVolume(Number(slider.value) / 100); GameAudio.resume(); });
+  mute.addEventListener('click', () => {
+    if (GameAudio.muted || GameAudio.volume === 0) { if (GameAudio.volume === 0) GameAudio.setVolume(0.5); else GameAudio.setMuted(false); }
+    else GameAudio.setMuted(true);
+  });
+  // arrow keys on the slider adjust the volume only (they don't also steer the skater)
+  vol.addEventListener('keydown', (e) => e.stopPropagation());
+  vol.addEventListener('keyup', (e) => e.stopPropagation());
+
+  // close on outside click / Esc (Esc here does not also reach the partner menu when a HUD panel is open)
+  addEventListener('pointerdown', (e) => {
+    if (isOpen() && !left.contains(e.target)) setOpen(false);
+    if (volOpen() && !volWrap.contains(e.target)) setVolOpen(false);
+  }, true);
+  addEventListener('keydown', (e) => {
+    if (e.code !== 'Escape' || !(isOpen() || volOpen())) return;
+    setOpen(false); setVolOpen(false);
+    e.stopImmediatePropagation();
+  }, true);
+
+  document.body.appendChild(left);
+  document.body.appendChild(right);
+  return { left, right, isServerOpen: isOpen, isVolumeOpen: volOpen };
+}
+
+// ===== fx/celebration.js =====
+// "축하하기" (2026-11-03): for ~3.6 s (exactly 3 tosses) the skater keeps skating while both arms scoop low and toss sparkling confetti
+// overhead about every 1.25 s. Only the arms are layered on top of the normal skating pose (after player.update),
+// so movement, steering and the skating legs / torso are untouched. One pooled Points object (420 pieces) for all
+// confetti; each piece starts fading 2 s after it is thrown and is gone by 2.7 s.
+class Celebration {
+  constructor({ player, scene, iceY }) {
+    this.player = player;
+    this.iceY = iceY;
+    this.active = false;
+    this.t = 0;
+    this.w = 0;                                   // arm overlay weight (eases in / out)
+    this.dur = 3.6;                               // 2026-11-03: exactly 3 throws (0.73 s, 1.98 s, 3.23 s), then ease back
+    this.maxThrows = 3;
+    this.throws = 0;
+    this.period = 1.25;
+    this.lastThrow = -1;
+    const N = (this.N = 420);
+    this.pos = new Float32Array(N * 3);
+    this.vel = new Float32Array(N * 3);
+    this.age = new Float32Array(N).fill(99);
+    this.spin = new Float32Array(N);
+    this.flipRate = new Float32Array(N);
+    this.ph = new Float32Array(N);
+    this.ang = new Float32Array(N);
+    this.flip = new Float32Array(N);
+    this.alpha = new Float32Array(N);
+    const col = new Float32Array(N * 3), size = new Float32Array(N);
+    const palette = [0xffd36e, 0xff8fb1, 0x7ee0c3, 0x8cc8ff, 0xc7a6ff, 0xfff3dc, 0xffb27a].map((h) => new THREE.Color(h));
+    for (let i = 0; i < N; i++) {
+      palette[i % palette.length].toArray(col, i * 3);
+      size[i] = 0.045 + Math.random() * 0.025;
+      this.ph[i] = Math.random() * Math.PI * 2;
+    }
+    this.next = 0;
+    const g = new THREE.BufferGeometry();
+    const dyn = (arr, n) => new THREE.BufferAttribute(arr, n).setUsage(THREE.DynamicDrawUsage);
+    g.setAttribute('position', dyn(this.pos, 3));
+    g.setAttribute('aAng', dyn(this.ang, 1));
+    g.setAttribute('aFlip', dyn(this.flip, 1));
+    g.setAttribute('aAlpha', dyn(this.alpha, 1));
+    g.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
+    g.setAttribute('aSize', new THREE.BufferAttribute(size, 1));
+    this.mat = new THREE.ShaderMaterial({
+      uniforms: { uViewportH: { value: 1080 } },
+      transparent: true, depthWrite: false,
+      vertexShader: /* glsl */ `
+        uniform float uViewportH;
+        attribute float aAng; attribute float aFlip; attribute float aAlpha; attribute vec3 aColor; attribute float aSize;
+        varying float vAng; varying float vFlip; varying float vAlpha; varying vec3 vColor;
+        void main() {
+          vAng = aAng; vFlip = cos( aFlip ); vAlpha = aAlpha; vColor = aColor;
+          vec4 mv = modelViewMatrix * vec4( position, 1.0 );
+          gl_Position = projectionMatrix * mv;
+          float dist = max( - mv.z, 0.1 );
+          gl_PointSize = aAlpha <= 0.0 ? 0.0 : clamp( aSize * uViewportH * projectionMatrix[ 1 ][ 1 ] * 0.5 / dist, 1.5, 28.0 );
+        }`,
+      fragmentShader: /* glsl */ `
+        varying float vAng; varying float vFlip; varying float vAlpha; varying vec3 vColor;
+        void main() {
+          vec2 c = gl_PointCoord - 0.5;
+          float ca = cos( vAng ), sa = sin( vAng );
+          vec2 q = vec2( ca * c.x - sa * c.y, sa * c.x + ca * c.y );
+          float hh = 0.42 * max( abs( vFlip ), 0.1 );                   // a small paper strip tumbling in the air
+          float m = ( 1.0 - smoothstep( 0.19, 0.23, abs( q.x ) ) ) * ( 1.0 - smoothstep( hh - 0.04, hh, abs( q.y ) ) );
+          if ( m * vAlpha < 0.01 ) discard;
+          float glint = pow( abs( vFlip ), 14.0 );                     // catches the light as it turns → sparkle
+          vec3 col = vColor * ( 0.75 + 0.25 * abs( vFlip ) ) * ( 1.0 + 2.4 * glint );
+          gl_FragColor = vec4( col, m * vAlpha );
+        }`,
+    });
+    this.points = new THREE.Points(g, this.mat);
+    this.points.frustumCulled = false;
+    this.points.name = 'Confetti';
+    scene.add(this.points);
+  }
+  setViewportHeight(h) { this.mat.uniforms.uViewportH.value = h; }
+  start() {
+    if (this.active) return false;
+    this.active = true; this.t = 0; this.lastThrow = -1; this.throws = 0;
+    return true;
+  }
+  // interrupted (spin / jump / partner / proposal take the arms): the overlay stops at once so it never alters
+  // those animations; confetti already thrown keeps falling. (At the natural end the arms ease back over 0.6 s.)
+  stop() { this.active = false; this.w = 0; }
+  // arms: called every fixed step right after the normal skating update
+  afterStep(dt) {
+    if (this.active) { this.t += dt; if (this.t >= this.dur) this.active = false; }
+    this.w = this.active ? Math.min(1, this.w + dt / 0.35) : Math.max(0, this.w - dt / 0.6);
+    if (this.w <= 0) return;
+    const R = this.player.rig, sm = psSm, w = sm(0, 1, this.w);
+    const p = (this.t % this.period) / this.period;
+    // k: 0 = scooping low in front, 1 = arms up overhead (release at the top)
+    const k = p < 0.35 ? 0 : p < 0.58 ? sm(0.35, 0.58, p) : p < 0.78 ? 1 : 1 - sm(0.78, 1, p);
+    R.torso.updateWorldMatrix(true, true);
+    for (const [arm, side] of [[R.armL, 1], [R.armR, -1]]) {
+      const sh = arm.shoulder.position;
+      const scoop = 0.03 * Math.sin(p / 0.35 * Math.PI) * (p < 0.35 ? 1 : 0);
+      const low = new THREE.Vector3(sh.x - side * 0.07, sh.y - 0.36 - scoop, sh.z + 0.2);
+      const high = new THREE.Vector3(sh.x + side * 0.13, sh.y + 0.4, sh.z + 0.09);
+      const tgt = R.torso.localToWorld(low.lerp(high, k));
+      const pole = new THREE.Vector3(0.55 * side, -1, -0.35).lerp(new THREE.Vector3(side, -0.3, 0), k);
+      psArmIK(R, arm, side, tgt, w, pole);
+    }
+    // toss: once per cycle, at the top of the swing
+    const cycle = Math.floor(this.t / this.period);
+    if (this.active && p >= 0.58 && cycle !== this.lastThrow && this.throws < this.maxThrows) {
+      this.lastThrow = cycle;
+      this.throws++;
+      R.torso.updateWorldMatrix(true, true);
+      const h = this.player.mesh.rotation.y, f = new THREE.Vector3(Math.sin(h), 0, Math.cos(h)), l = new THREE.Vector3(Math.cos(h), 0, -Math.sin(h));
+      for (const [arm, side] of [[R.armL, 1], [R.armR, -1]]) this._burst(psPalm(R, arm), f, l.clone().multiplyScalar(side), 24);
+    }
+  }
+  _burst(at, f, out, n) {
+    const v0 = this.player.velocity;
+    for (let j = 0; j < n; j++) {
+      const i = this.next; this.next = (this.next + 1) % this.N;
+      const o = i * 3, a = Math.random() * Math.PI * 2, r = 0.3 + Math.random() * 0.9;
+      this.pos[o] = at.x + (Math.random() - 0.5) * 0.08; this.pos[o + 1] = at.y + Math.random() * 0.05; this.pos[o + 2] = at.z + (Math.random() - 0.5) * 0.08;
+      this.vel[o] = Math.cos(a) * r + out.x * 0.55 + f.x * 0.25 + v0.x * 0.8;
+      this.vel[o + 1] = 2.4 + Math.random() * 1.6;
+      this.vel[o + 2] = Math.sin(a) * r + out.z * 0.55 + f.z * 0.25 + v0.z * 0.8;
+      this.age[i] = 0;
+      this.ang[i] = Math.random() * Math.PI * 2;
+      this.flip[i] = Math.random() * Math.PI * 2;
+      this.spin[i] = (Math.random() - 0.5) * 9;
+      this.flipRate[i] = 5 + Math.random() * 7;
+    }
+  }
+  // confetti: called once per rendered frame
+  update(dt) {
+    let any = false;
+    for (let i = 0; i < this.N; i++) {
+      if (this.age[i] > 2.7) { if (this.alpha[i] !== 0) { this.alpha[i] = 0; any = true; } continue; }
+      any = true;
+      const o = i * 3, A = (this.age[i] += dt);
+      const drag = Math.exp(-2.2 * dt);
+      this.vel[o] *= drag; this.vel[o + 2] *= drag;
+      this.vel[o + 1] = Math.max(-0.9, this.vel[o + 1] * Math.exp(-0.9 * dt) - 4.2 * dt);   // light paper: slow fall
+      const sway = Math.sin(A * 3.1 + this.ph[i]) * 0.35;
+      this.pos[o] += (this.vel[o] + sway * Math.cos(this.ph[i])) * dt;
+      this.pos[o + 1] += this.vel[o + 1] * dt;
+      this.pos[o + 2] += (this.vel[o + 2] + sway * Math.sin(this.ph[i])) * dt;
+      if (this.pos[o + 1] < this.iceY + 0.01) { this.pos[o + 1] = this.iceY + 0.01; this.vel[o] = this.vel[o + 1] = this.vel[o + 2] = 0; }
+      const onIce = this.pos[o + 1] <= this.iceY + 0.011;
+      this.ang[i] += this.spin[i] * dt * (onIce ? 0 : 1);
+      this.flip[i] += this.flipRate[i] * dt * (onIce ? 0 : 1);
+      this.alpha[i] = A < 2 ? 1 : Math.max(0, 1 - (A - 2) / 0.7);    // fade starts at 2 s, gone at 2.7 s
+    }
+    if (!any) return;
+    const at = this.points.geometry.attributes;
+    at.position.needsUpdate = at.aAng.needsUpdate = at.aFlip.needsUpdate = at.aAlpha.needsUpdate = true;
+  }
+}
+
 // ===== main.js =====
 
 
@@ -4554,6 +5353,14 @@ document.getElementById('app').appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(38, window.innerWidth / window.innerHeight, 0.1, 1200);
+// portrait phones (2026-11-03): the follow camera's fixed 55° vertical view leaves only ~33° across a tall phone
+// screen, so the partner and most of the rink fall off the sides. On portrait screens only, the vertical view widens
+// so at least ~44° stays visible across (capped at 76° vertical). Desktop / landscape: the camera's own 55°, unchanged.
+function fitCameraFov(aspect) {
+  const base = (camera.userData.baseFov ??= camera.fov);           // the FollowCamera's value (55°)
+  const needed = THREE.MathUtils.radToDeg(2 * Math.atan(Math.tan(THREE.MathUtils.degToRad(22)) / aspect));
+  camera.fov = aspect >= 1 ? base : THREE.MathUtils.clamp(needed, base, 76);
+}
 camera.layers.enable(EXTERIOR_LAYER);   // exterior scenery: seen by this camera, skipped by the ice reflection
 
 // ---- background + lighting -------------------------------------------------
@@ -4587,6 +5394,8 @@ const skater2 = (() => {
   return R;
 })();
 const cine = new FollowCamera(camera);
+fitCameraFov(camera.aspect);                                       // (after the FollowCamera set its 55°)
+camera.updateProjectionMatrix();
 const controls = new PointerControls(renderer.domElement, camera, cine, player, world.bounds, scene);
 const skateFx = new SkateFX(scene, player, world.bounds);
 skateFx.setViewportHeight(renderer.getDrawingBufferSize(new THREE.Vector2()).y);
@@ -4602,14 +5411,15 @@ const partner = new PartnerSkating({
 controls.onTap = (ray) => partner.handleTap(ray);
 
 // ---- white rose collection + Ask Out proposal (2026-11-03) ---------------------------------------------
-STORY_UI.mount();
-const pillStyle = partner.menu.firstChild.style.cssText;
+const topHud = createTopHud({ toast: (text, sec) => STORY_UI.toast(text, sec) });   // top-left rooms, top-right volume
+STORY_UI.mount(topHud.right);                                                        // rose counter: top-right, after the volume
+const pillStyle = partner.pillStyle;
 const roseCollector = new RoseCollector({
   roses: world.roses, scene, camera, dom: renderer.domElement, pillStyle,
   onCollect: (n, total) => {
     STORY_UI.setCount(n, total);
-    if (n === total) STORY_UI.toast(`${total}/${total} White Roses — Ask Out Unlocked!`, 5);   // once, when it unlocks
-    else STORY_UI.toast(`White Roses ${n}/${total}`, 3);
+    if (n === total) STORY_UI.toast(`하얀 장미를 모두 모았어요. ${total}/${total} — 고백하기가 열렸어요!`, 5);   // once, when it unlocks
+    else STORY_UI.toast(`하얀 장미를 획득했어요. ${n}/${total}`, 3);
     updateAskOut();
   },
 });
@@ -4622,29 +5432,25 @@ const proposal = new ProposalSequence({
 });
 // TEMPORARY (testing): Ask Out is always available and can be replayed. Set to false to restore the
 // original rule (unlocks after all 10 roses, plays once). Rose collection / counter are unaffected.
-const ASK_OUT_TEST_UNLOCK = true;
+const ASK_OUT_TEST_UNLOCK = false;                                   // (2026-11-03: test bypass off — 10 roses unlock it again)
 proposal.allowReplay = ASK_OUT_TEST_UNLOCK;
 // "Ask Out" joins her menu (Help · Hold Hands · Dance · Ask Out); locked until all roses are collected
 const askBtn = document.createElement('button');
-askBtn.textContent = 'Ask Out';
-askBtn.style.cssText = pillStyle;
-partner.menu.style.flexWrap = 'wrap';
-partner.menu.style.justifyContent = 'center';
-partner.menu.style.width = 'max-content';
-partner.menu.style.maxWidth = '92vw';
+askBtn.textContent = '고백하기';
+askBtn.style.cssText = partner.radialItemStyle;                    // 4th item of her radial menu
+askBtn.className = 'tap-pill radial-pill radial-item';
 function updateAskOut() {
   const open = ASK_OUT_TEST_UNLOCK ? !proposal.active
     : roseCollector.count >= roseCollector.total && !proposal.done && !proposal.active;
-  askBtn.style.opacity = open ? '1' : '0.45';
-  askBtn.setAttribute('aria-disabled', open ? 'false' : 'true');
+  askBtn.setAttribute('aria-disabled', open ? 'false' : 'true');    // locked look: dimmed colours (CSS .radial-item)
 }
 askBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
 askBtn.addEventListener('click', (e) => {
   e.stopPropagation();
   askBtn.blur();
   if (proposal.active) return;
-  if (!ASK_OUT_TEST_UNLOCK && proposal.done) { STORY_UI.toast('Ask Out has already been played.', 3); return; }
-  if (!ASK_OUT_TEST_UNLOCK && roseCollector.count < roseCollector.total) { STORY_UI.toast('Collect all 10 white roses to unlock Ask Out.', 3); return; }
+  if (!ASK_OUT_TEST_UNLOCK && proposal.done) { STORY_UI.toast('이미 고백했어요.', 3); return; }
+  if (!ASK_OUT_TEST_UNLOCK && roseCollector.count < roseCollector.total) { STORY_UI.toast('하얀 장미 10 송이를 모으면 고백할 수 있어요.', 3); return; }
   if (player.trick || player.spin || partner.mode === 'dance') return;
   partner.closeMenu();
   roseCollector.close();
@@ -4660,40 +5466,69 @@ controls.onTap = (ray) => {
   return partner.handleTap(ray);
 };
 
-// ---- temporary Triple Axel button --------------------------------------------
-const axelBtn = document.createElement('button');
-axelBtn.textContent = '트리플 악셀';
-axelBtn.style.cssText = [
-  'position:fixed', 'left:50%', 'bottom:22px', 'transform:translateX(calc(-100% - 5px))', 'z-index:10',   // Spin sits to its right
-  'padding:9px 22px', 'border-radius:999px', 'border:1px solid rgba(243,217,184,.45)',
-  'background:rgba(6,12,26,.55)', 'color:#f3d9b8', 'cursor:pointer',
-  'font:300 13px/1 "Helvetica Neue", Arial, sans-serif', 'letter-spacing:.18em',
-  'backdrop-filter:blur(4px)', '-webkit-backdrop-filter:blur(4px)', 'transition:opacity .3s',
+// ---- bottom action bar (2026-11-03): 축하하기 · 스핀돌기 · 트리플악셀 ----------------------------------------
+const actionBar = document.createElement('div');
+actionBar.style.cssText = [
+  'position:fixed', 'left:50%', 'bottom:calc(20px + env(safe-area-inset-bottom))', 'transform:translateX(-50%)', 'z-index:10', 'display:flex',
+  'align-items:stretch', 'justify-content:center', 'max-width:calc(100vw - 16px)', 'box-sizing:border-box',
+  // one shared capsule (2026-11-03): the three actions are areas inside it
+  'padding:3px', 'border-radius:999px', 'border:1px solid rgba(243,217,184,.45)', 'background:rgba(6,12,26,.55)',
+  'backdrop-filter:blur(4px)', '-webkit-backdrop-filter:blur(4px)',
 ].join(';');
+document.body.appendChild(actionBar);
+const ACTION_BTN_CSS = [
+  'flex:0 1 auto', 'white-space:nowrap', 'box-sizing:border-box', 'margin:0',
+  'padding:12px clamp(16px, 4.6vw, 28px)', 'border-radius:999px', 'border:0',
+  'background:transparent', 'color:#f3d9b8', 'cursor:pointer',
+  `font:400 13px/1.2 ${HUD_FONT}`, 'letter-spacing:0',                   // Pretendard; 13px desktop / 12px phones (CSS .action-btn), letter-spacing 0
+  'display:inline-flex', 'align-items:center', 'justify-content:center', 'text-align:center',
+  'transition:opacity .3s',
+].join(';');
+// (2026-11-04) bottom actions show their Korean labels only (the icons were removed)
+function actionLabel(btn, text) {
+  const span = document.createElement('span');
+  span.textContent = text;
+  btn.replaceChildren(span);
+}
+
+// 축하하기: ~10 s of confetti tossing while skating on (arms only; movement keeps working)
+const celebration = new Celebration({ player, scene, iceY: world.bounds.iceY });
+celebration.setViewportHeight(renderer.getDrawingBufferSize(new THREE.Vector2()).y);
+const celebrateBtn = document.createElement('button');
+actionLabel(celebrateBtn, '축하하기');
+celebrateBtn.style.cssText = ACTION_BTN_CSS;
+celebrateBtn.addEventListener('click', () => {
+  celebrateBtn.blur();
+  if (celebrateBtn.disabled || celebration.active || proposal.active || player.trick || player.spin) return;
+  partner.cancel();                     // Help / Hold Hands: let go first (both hands are needed)
+  celebration.start();
+});
+
+// 스핀돌기 / 트리플악셀: the existing Spin and Triple Axel (unchanged); starting either ends a celebration
+const spinBtn = document.createElement('button');
+actionLabel(spinBtn, '스핀돌기');
+spinBtn.style.cssText = ACTION_BTN_CSS;
+spinBtn.addEventListener('click', () => {
+  if (spinBtn.disabled) return;
+  partner.cancel();                     // Help / Hold Hands: let go first, then spin
+  if (player.startSpin(() => setActionBusy(false))) { setActionBusy(true); celebration.stop(); }
+  spinBtn.blur();
+});
+const axelBtn = document.createElement('button');
+actionLabel(axelBtn, '트리플 악셀');
+axelBtn.style.cssText = ACTION_BTN_CSS;
 axelBtn.addEventListener('click', () => {
   if (axelBtn.disabled) return;
   partner.cancel();                     // Help / Hold Hands: let go first, then jump
   const started = player.startTripleAxel(() => setActionBusy(false));
-  if (started) setActionBusy(true);
+  if (started) { setActionBusy(true); celebration.stop(); }
   axelBtn.blur();
 });
-document.body.appendChild(axelBtn);
-
-// ---- Spin button (same style, right next to the Triple Axel button) ---------------------
-const spinBtn = document.createElement('button');
-spinBtn.textContent = 'Spin';
-spinBtn.style.cssText = axelBtn.style.cssText;
-spinBtn.style.transform = 'translateX(5px)';
-spinBtn.addEventListener('click', () => {
-  if (spinBtn.disabled) return;
-  partner.cancel();                     // Help / Hold Hands: let go first, then spin
-  if (player.startSpin(() => setActionBusy(false))) setActionBusy(true);
-  spinBtn.blur();
-});
-document.body.appendChild(spinBtn);
-// one action at a time: while the Triple Axel, the Spin or the partner dance runs, both buttons rest
+actionBar.append(celebrateBtn, spinBtn, axelBtn);
+for (const b of [celebrateBtn, spinBtn, axelBtn]) b.className = 'action-btn';
+// one action at a time: while the Triple Axel, the Spin, the partner dance or the proposal runs, the buttons rest
 function setActionBusy(b) {
-  for (const btn of [axelBtn, spinBtn]) { btn.disabled = b; btn.style.opacity = b ? '0.4' : '1'; }
+  for (const btn of [celebrateBtn, axelBtn, spinBtn]) { btn.disabled = b; btn.style.opacity = b ? '0.4' : '1'; }
 }
 
 // ---- post: HDR target with MSAA → bloom → tone mapping ---------------------
@@ -4708,6 +5543,7 @@ composer.addPass(new OutputPass());
 function onResize() {
   const w = window.innerWidth, h = window.innerHeight;
   camera.aspect = w / h;
+  fitCameraFov(camera.aspect);
   camera.updateProjectionMatrix();
   renderer.setSize(w, h);
   composer.setSize(w, h);
@@ -4717,6 +5553,7 @@ function onResize() {
   if (typeof skateFx !== 'undefined') skateFx.setViewportHeight(b.y);
   if (typeof skateFx2 !== 'undefined') skateFx2.setViewportHeight(b.y);
   if (typeof roseCollector !== 'undefined') roseCollector.setViewportHeight(b.y);
+  if (typeof celebration !== 'undefined') celebration.setViewportHeight(b.y);
 }
 window.addEventListener('resize', onResize);
 
@@ -4740,6 +5577,7 @@ function simulate(frameDt, t) {
       if (!partner.preUpdate(SIM_STEP)) player.update(SIM_STEP);   // the dance drives the player itself; otherwise normal control
       partner.postUpdate(SIM_STEP);
       proposal.afterStep(SIM_STEP);                               // (eases both rigs back for 0.8 s after the proposal)
+      celebration.afterStep(SIM_STEP);                            // 축하하기: arms layered on the skating pose
     }
     simAcc -= SIM_STEP;
     dt += SIM_STEP;
@@ -4751,6 +5589,9 @@ function simulate(frameDt, t) {
     roseCollector.update(dt);
     skateFx.update(dt);
     skateFx2.update(dt);
+    // a celebration ends if something else takes over his arms (partner modes, the proposal, a jump / spin)
+    if (celebration.active && (proposal.active || partner.mode || partner.H.active || player.trick || player.spin)) celebration.stop();
+    celebration.update(dt);
   }
   world.update(t);
 }
@@ -4758,9 +5599,9 @@ function simulate(frameDt, t) {
 // ---- FPS counter (small, top-right, does not take clicks) -------------------
 const fpsEl = document.createElement('div');
 fpsEl.style.cssText = [
-  'position:fixed', 'top:10px', 'right:12px', 'z-index:12', 'pointer-events:none',
+  'position:fixed', 'top:calc(60px + env(safe-area-inset-top))', 'right:calc(12px + env(safe-area-inset-right))', 'z-index:12', 'pointer-events:none',   // below the HUD row
   'padding:3px 8px', 'border-radius:6px', 'background:rgba(6,12,26,.45)', 'color:rgba(243,217,184,.85)',
-  'font:12px/1.3 ui-monospace, Menlo, Consolas, monospace', 'letter-spacing:.04em',
+  'font:12px/1.3 ui-monospace, Menlo, Consolas, monospace', 'letter-spacing:0',
 ].join(';');
 fpsEl.textContent = '-- FPS';
 document.body.appendChild(fpsEl);
