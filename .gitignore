@@ -12,6 +12,7 @@
 !/winter-rink/
 !/assets/
 !/assets/*
+!/server/
 
 # never commit
 node_modules/
@@ -20,3 +21,4 @@ node_modules/
 *.pem
 *.key
 *.zip
+.DS_Store

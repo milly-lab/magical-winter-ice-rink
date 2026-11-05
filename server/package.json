@@ -1,0 +1,13 @@
+{
+  "name": "winterwood-rink-server",
+  "private": true,
+  "description": "Multiplayer server for the Winterwood Ice Rink (Cloudflare Worker + Durable Object, Free plan)",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "devDependencies": {
+    "wrangler": "^4.34.0"
+  }
+}

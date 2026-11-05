@@ -1,0 +1,24 @@
+{
+  // Cloudflare settings for the Winterwood Ice Rink multiplayer server (Workers Free plan).
+  // The Worker name in the Cloudflare dashboard must be exactly "winterwood-rink" (builds fail otherwise).
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "winterwood-rink",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "durable_objects": {
+    "bindings": [{ "name": "RINK", "class_name": "RinkRoom" }]
+  },
+  // the Free plan only supports SQLite-backed Durable Objects
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RinkRoom"] }],
+  // plain settings (NOT secrets — safe to be public)
+  "vars": {
+    // pages allowed to connect (origin = scheme + host only; the GitHub Pages path is not part of it)
+    "ALLOWED_ORIGINS": "https://milly-lab.github.io",
+    // room capacity: 4 players in total (agreed starting point; raise only after real phone tests)
+    "MAX_PLAYERS": "4",
+    // incoming messages per UTC day before new players are refused: 1,600,000 msgs ≈ 80,000 billed requests (80% of the free 100,000)
+    "DAILY_MESSAGE_BUDGET": "1600000"
+  },
+  "observability": { "enabled": true }
+}
