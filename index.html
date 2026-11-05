@@ -2910,19 +2910,24 @@ class PlaceholderPlayer {
     const ix = (k.has('KeyD') || k.has('ArrowRight') ? 1 : 0) - (k.has('KeyA') || k.has('ArrowLeft') ? 1 : 0);
     const iz = (k.has('KeyS') || k.has('ArrowDown') ? 1 : 0) - (k.has('KeyW') || k.has('ArrowUp') ? 1 : 0);
     const v = this.velocity;
-    if (ix || iz) this.target = null;   // keyboard always wins
+    // (2026-11-05) touch joystick (main.js sets this.stick: camera-relative unit direction x/z + amount m 0…1);
+    // the keyboard wins when both are used. Same push / glide / limits as the keys, scaled by the stick amount.
+    const st = this.stick, joy = !(ix || iz) && st && st.m > 0 ? st : null;
+    const ax = joy ? joy.x * joy.m : ix, az = joy ? joy.z * joy.m : iz;
+    const input = !!(ix || iz || joy);
+    if (input) this.target = null;      // keyboard / joystick always win
     if (this.target) this._steerToTarget(dt);
     // holding a key builds the push up smoothly: 14 (as before) → 36 m/s² over ~1.2 s
-    this._hold = (ix || iz) ? Math.min(1.2, (this._hold || 0) + dt) : 0;
+    this._hold = input ? Math.min(1.2, (this._hold || 0) + dt) : 0;
     const hk = this._hold / 1.2, build = hk * hk * (3 - 2 * hk);
     const push = this.trick ? 14 : 14 + 22 * build;     // Triple Axel keeps its original handling
-    v.x += ix * push * dt;
-    v.z += iz * push * dt;
+    v.x += ax * push * dt;
+    v.z += az * push * dt;
     if (!this.target || this.trick) v.multiplyScalar(Math.exp(-1.2 * dt)); // icy glide (tap-steering controls its own speed)
     if (this.glideOut) {                    // post-landing coast: speed eases out smoothly to a stop
       const G = this.glideOutState;
       G.t += dt;
-      if (ix || iz || this.target || G.t >= G.time) this.glideOut = false;
+      if (input || this.target || G.t >= G.time) this.glideOut = false;
       else {
         const sp = G.v0 * (1 - G.t / G.time) ** G.p;
         if (v.lengthSq() > 1e-6) v.setLength(sp);   // keep direction (slides along the boards if it meets them)
@@ -2930,6 +2935,10 @@ class PlaceholderPlayer {
     }
     const vmax = this.trick ? 9 : 27;      // top speed ×3 (unchanged while jumping)
     if (!this.glideOut && v.length() > vmax) v.setLength(vmax);
+    // joystick: a partly pushed stick asks for a proportionally lower top speed (eased, never a hard brake)
+    if (joy) { const sp = v.length(), cap = vmax * joy.m; if (sp > cap) v.setLength(sp + (cap - sp) * (1 - Math.exp(-dt * 2.5))); }
+    // 안무 연습: lower top speed during the jump / spin elements (the limit itself eases in and out; steering stays free)
+    if (this.routine && !this.glideOut && v.length() > this.routine.vmax) v.setLength(this.routine.vmax);
 
     const p = this.mesh.position;
     p.addScaledVector(v, dt);
@@ -2960,12 +2969,20 @@ class PlaceholderPlayer {
     }
     this.mesh.rotation.y = this.heading;
     this._animate(dt, speed, turn / Math.max(dt, 1e-3));
+    if (this.routine) this.routine.step(dt, speed);   // 안무 연습: poses / turns / jump height on top of his skating
     if (this.trick) this._applyTrick(dt);
+  }
+
+  // ---- 안무 연습 (2026-11-05): ~29 s routine (Layback Ina Bauer → Salchow → I-Spin), see player/choreography.js ----
+  startRoutine(onEnd) {
+    if (this.trick || this.spin || this.routine) return false;
+    this.routine = new Choreography(this, onEnd);
+    return true;
   }
 
   // ---- Triple Axel (≈3 s): prep 0.5 s → air + 1080° spin 1.5 s → landing 1 s ----
   startTripleAxel(onEnd) {
-    if (this.trick || this.spin) return false;
+    if (this.trick || this.spin || this.routine) return false;
     const v = this.velocity;
     if (v.length() > 9) v.setLength(9);    // enter the jump at the original speed range so it plays exactly as before
     if (v.length() < 1.0) v.set(Math.sin(this.heading), 0, Math.cos(this.heading)).multiplyScalar(1.0); // gentle creep into the prep
@@ -3164,7 +3181,7 @@ class PlaceholderPlayer {
   // Left foot is the spinning foot; every frame the pose is re-grounded so that blade sits exactly on the
   // spin axis (the root) at the usual ice-contact height — no sliding, floating or sinking.
   startSpin(onEnd) {
-    if (this.trick || this.spin) return false;
+    if (this.trick || this.spin || this.routine) return false;
     const rate = (t) => (0.12 * psSm(0, 0.9, t) + 0.88 * psSm(1.0, 4.6, t)) * (1 - psSm(6.6, 9.7, t));
     let area = 0;
     for (let t = 0; t < 10; t += 0.005) area += rate(t) * 0.005;
@@ -3176,7 +3193,7 @@ class PlaceholderPlayer {
   }
 
   _applySpin(dt) {
-    const S = this.spin, R = this.rig, L = R.L, END = 11.7;
+    const S = this.spin, R = this.rig, L = R.L, END = 11.0;   // (2026-11-05: 11.7 → 11.0, shorter T-pose hold)
     S.t = Math.min(END, S.t + dt);
     const t = S.t;
     const mix = (a, b, w) => a + (b - a) * w;
@@ -3188,8 +3205,8 @@ class PlaceholderPlayer {
     // ---- choreography weights ----
     const wSit = psSm(0.4, 1.9, t) * (1 - psSm(3.9, 5.4, t));      // sit spin
     const wHigh = psSm(4.3, 5.9, t) * (1 - psSm(7.5, 8.9, t));     // high leg (catch-foot ring)
-    const wT = psSm(9.0, 9.9, t);                                  // finishing T-pose (as the rotation comes to rest), held to 10.9 s
-    const wOut = psSm(10.9, 11.7, t);                              // then hand back to the normal skating pose
+    const wT = psSm(9.0, 9.9, t);                                  // finishing T-pose (as the rotation comes to rest), held to 10.2 s
+    const wOut = psSm(10.2, 11.0, t);                              // then hand back to the normal skating pose (2026-11-05: hold 1.0 → 0.3 s)
     // upright spin (start and finish): legs together, free leg crossed in front, arms drawn in for speed
     const P = {
       pp: 0, sx: -0.03, sk: 0.08, fx: -0.28, fz: -0.04, fk: 0.45, fa: 0.45, tx: 0.06, nx: -0.04,
@@ -3302,7 +3319,7 @@ class PlaceholderPlayer {
     const R = this.rig;
     this.time += dt;
     const t = this.time;
-    const pushing = this.keys.size > 0 || (this.target !== null && speed < 5.5);
+    const pushing = this.keys.size > 0 || (this.stick && this.stick.m > 0) || (this.target !== null && speed < 5.5);
     const target = THREE.MathUtils.clamp(speed / 2.5, 0, 1);
     this.glide = lerp(this.glide, target, 1 - Math.exp(-dt * 4));
     const g = this.glide;
@@ -3468,6 +3485,94 @@ class PointerControls {
     this.marker.material.opacity = 0.75 * this.markerLife;
     this.marker.visible = this.markerLife > 0;
     this.marker.scale.setScalar(1 + (1 - this.markerLife) * 0.6);
+  }
+}
+
+// ===== input/touchJoystick.js =====
+// (2026-11-05) minimal joystick, bottom-left, on every device (touch drag / mouse drag). It is its own element above
+// the canvas, so its touches never reach the canvas (no tap-to-move, no camera drag) and it keeps its finger with
+// pointer capture. Output: screen direction (x right, y up, unit) + amount m (0 inside the dead zone … 1 at the rim).
+// main.js turns that into a camera-relative world direction for the skater every frame.
+class TouchJoystick {
+  constructor({ travel = 34, dead = 0.14 } = {}) {
+    this.x = 0; this.y = 0; this.m = 0;
+    this.travel = travel; this.dead = dead;
+    this.id = null; this.cx = 0; this.cy = 0;
+    const el = (this.el = document.createElement('div'));
+    el.className = 'joystick';
+    el.style.cssText = [
+      'position:fixed', 'left:calc(16px + env(safe-area-inset-left))', 'bottom:calc(96px + env(safe-area-inset-bottom))',
+      'width:116px', 'height:116px', 'z-index:9', 'display:none', 'touch-action:none',
+      '-webkit-user-select:none', 'user-select:none', '-webkit-touch-callout:none',
+    ].join(';');
+    const ring = (this.ring = document.createElement('div'));
+    ring.style.cssText = [
+      'position:absolute', 'left:10px', 'top:10px', 'width:96px', 'height:96px', 'border-radius:50%', 'box-sizing:border-box',
+      'border:1px solid rgba(243,217,184,.32)', 'background:rgba(6,12,26,.26)', 'pointer-events:none',
+      'backdrop-filter:blur(2px)', '-webkit-backdrop-filter:blur(2px)',
+    ].join(';');
+    const knob = (this.knob = document.createElement('div'));
+    knob.style.cssText = [
+      'position:absolute', 'left:50%', 'top:50%', 'width:40px', 'height:40px', 'margin:-20px 0 0 -20px', 'border-radius:50%',
+      'box-sizing:border-box', 'border:1px solid rgba(246,241,231,.55)', 'background:rgba(240,246,252,.30)', 'pointer-events:none',
+      'transition:transform .18s ease-out', 'will-change:transform',
+    ].join(';');
+    ring.appendChild(knob);
+    el.appendChild(ring);
+    document.body.appendChild(el);
+    el.addEventListener('pointerdown', (e) => this._down(e));
+    el.addEventListener('pointermove', (e) => this._move(e));
+    el.addEventListener('pointerup', (e) => this._up(e));
+    el.addEventListener('pointercancel', (e) => this._up(e));
+    el.addEventListener('lostpointercapture', (e) => this._up(e));
+    el.addEventListener('contextmenu', (e) => e.preventDefault());
+    addEventListener('blur', () => this.release());
+    document.addEventListener('visibilitychange', () => { if (document.hidden) this.release(); });
+    // (2026-11-05) shown on every device: touch drag on phones / tablets, mouse click-and-drag on desktop
+    el.style.display = 'block';
+    el.style.cursor = 'grab';
+  }
+  get visible() { return this.el.style.display !== 'none'; }
+  _centre() { const r = this.ring.getBoundingClientRect(); this.cx = r.left + r.width / 2; this.cy = r.top + r.height / 2; }
+  _down(e) {
+    e.preventDefault(); e.stopPropagation();
+    if (e.pointerType === 'mouse' && e.button !== 0) return;   // mouse: left button only
+    if (this.id !== null) return;                       // one finger / the mouse drives it; others are ignored
+    this.el.style.cursor = 'grabbing';
+    this.id = e.pointerId;
+    try { this.el.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+    this._centre();
+    this.knob.style.transition = 'none';
+    this._set(e.clientX, e.clientY);
+  }
+  _move(e) {
+    if (e.pointerId !== this.id) return;
+    e.preventDefault(); e.stopPropagation();
+    this._set(e.clientX, e.clientY);
+  }
+  _up(e) {
+    if (e.pointerId !== this.id) return;
+    e.stopPropagation();
+    this.release();
+  }
+  release() {
+    if (this.id !== null) { try { this.el.releasePointerCapture(this.id); } catch (err) { /* ignore */ } }
+    this.id = null; this.x = 0; this.y = 0; this.m = 0;
+    this.el.style.cursor = 'grab';
+    this.knob.style.transition = 'transform .18s ease-out';   // springs back to the centre
+    this.knob.style.transform = 'translate(0px, 0px)';
+  }
+  // the screen / browser bars changed size while held: keep the finger, re-measure the centre
+  onResize() { if (this.id !== null) this._centre(); }
+  _set(px, py) {
+    let dx = px - this.cx, dy = py - this.cy;
+    const len = Math.hypot(dx, dy), T = this.travel;
+    if (len > T) { dx *= T / len; dy *= T / len; }
+    this.knob.style.transform = `translate(${dx.toFixed(1)}px, ${dy.toFixed(1)}px)`;
+    const a = Math.min(1, len / T);
+    this.m = a <= this.dead ? 0 : (a - this.dead) / (1 - this.dead);
+    const l = Math.hypot(dx, dy);
+    if (l > 1e-3) { this.x = dx / l; this.y = -dy / l; }   // unit direction (screen up = +y)
   }
 }
 
@@ -3952,7 +4057,7 @@ class PartnerSkating {
   handleTap(raycaster) {
     if (this.menuOpen) { this.closeMenu(); return true; }
     if (this.mode === 'dance') return true;                      // input paused during the performance
-    if (this.player.trick || this.player.spin) return false;
+    if (this.player.trick || this.player.spin || this.player.routine) return false;
     if (raycaster.intersectObject(this.pick, false).length) {
       // (2026-11-03) her menu only opens when he is within 3 m; from farther away the tap is a normal
       // tap-to-move, so he simply skates toward her
@@ -3971,7 +4076,7 @@ class PartnerSkating {
   get busy() { return this.mode === 'dance'; }
 
   start(mode) {
-    if (this.player.trick || this.player.spin || this.mode === mode || this.mode === 'dance') return;
+    if (this.player.trick || this.player.spin || this.player.routine || this.mode === mode || this.mode === 'dance') return;
     this.mode = mode;
     const H = this.H;
     H.active = true; H.locked = false; H.idleT = -1; H.lastMode = mode;
@@ -3989,7 +4094,7 @@ class PartnerSkating {
   // normal tap-to-move steering; WASD, a new tap, Spin / Triple Axel or the proposal cancel the approach.
   approach(mode) {
     const P = this.player;
-    if (P.trick || P.spin || this.mode === 'dance' || this.mode === mode) return;
+    if (P.trick || P.spin || P.routine || this.mode === 'dance' || this.mode === mode) return;
     if (this.mode) this.cancel();                                  // switching from Help to Hold Hands (or back)
     this.pending = { mode, t: 0 };
     this._aimApproach();
@@ -4018,7 +4123,7 @@ class PartnerSkating {
     const p = P.mesh.position;
     const arrived = !P.target && Math.hypot(A.at.x - p.x, A.at.y - p.z) < 0.6;
     this.pending = null;
-    if (arrived && !P.trick && !P.spin) this.start(A.mode);           // there: the interaction begins as before
+    if (arrived && !P.trick && !P.spin && !P.routine) this.start(A.mode);           // there: the interaction begins as before
   }
 
   cancel() {                                                     // Help / Hold Hands → let go
@@ -4411,6 +4516,328 @@ class PartnerSkating {
   }
 }
 
+// ===== player/choreography.js =====
+// "안무 연습" (2026-11-05): a ~28.9 s figure-skating routine for the player skater, in this order:
+//   opening (arms open) → Layback Ina Bauer → step onto the right back edge, backward skating → Salchow (left back inside
+//   edge take-off, exactly one turn in the air, right back outside edge landing) → glide-out → turn forward →
+//   I-Spin on the left foot (free leg pulled up in front to head height, hands on the leg) → exit → normal skating.
+// The player keeps steering the whole time: his normal movement code still runs every step (joystick / WASD / tap),
+// heading still follows the travel direction; the routine only layers poses on top of his skating pose, adds turns
+// of the body about the vertical axis (sideways for the Ina Bauer, backward for the Salchow, the jump turn and the
+// spin), lifts him for the jump and softly limits the top speed during the jump (9 m/s) and the spin (3.5 m/s).
+// Poses are joint-space keyframes on the SAME shared rig (no new joints, lengths unchanged), cross-faded in order;
+// both-feet-on-ice poses use a two-bone leg IK so the blades sit on the ice; a light follow-through filter removes
+// any remaining snap. While a foot carries him (Ina Bauer, take-off, landing, turn, spin) that blade is "pinned":
+// the body is re-rooted onto it (nothing moves on screen) so turning and spinning pivot on that blade and nothing
+// slides when he stands still; the travel velocity still moves the root (and so the blade) as usual.
+const CH = {
+  END: 28.9,                        // (2026-11-05: Salchow preparation 1.5 s shorter → everything after it 1.5 s earlier)
+  spin: [20.2, 21.4, 25.8, 27.1],   // I-Spin turn rate: ramp up · full · slow down · stop (whole turns)
+  spinPeak: 15,                      // rad/s at full speed (≈2.4 turns/s)
+  jump: [14.45, 15.15],              // Salchow: off the ice → touch down (0.7 s in the air)
+  jumpH: 0.46,                       // m, top of the jump
+};
+const _chE = new THREE.Euler();
+const chQ = (a) => new THREE.Quaternion().setFromEuler(_chE.set(a[0], a[1], a[2]));
+const CH_HIP = [new THREE.Vector3(0.1, -0.02, 0), new THREE.Vector3(-0.1, -0.02, 0)];   // hip pivots in the pelvis (L, R)
+
+// two-bone leg IK in the pelvis frame: D = ankle target relative to the hip pivot; the knee bends toward `pole`
+function chLegIK(L, D, pole, outQ) {
+  const T = L.thigh, S = L.shin;
+  const dir = D.clone(); let d = dir.length(); dir.divideScalar(Math.max(d, 1e-6));
+  d = Math.min(Math.max(d, 0.2), T + S - 1e-4);
+  const kn = Math.acos(Math.min(1, Math.max(-1, (d * d - T * T - S * S) / (2 * T * S))));
+  const c = new THREE.Vector3(0, -T - S * Math.cos(kn), -S * Math.sin(kn)).normalize();   // hip → ankle, rest frame
+  const k = new THREE.Vector3(0, -T, 0); k.addScaledVector(c, -k.dot(c));                  // where the knee sticks out
+  if (k.lengthSq() < 1e-10) k.set(0, 0, 1);
+  k.normalize();
+  const kt = pole.clone().addScaledVector(dir, -pole.dot(dir));
+  if (kt.lengthSq() < 1e-8) kt.set(0, 0, 1).addScaledVector(dir, -dir.z);
+  kt.normalize();
+  const Ml = new THREE.Matrix4().makeBasis(c, k, new THREE.Vector3().crossVectors(c, k));
+  const Mt = new THREE.Matrix4().makeBasis(dir, kt, new THREE.Vector3().crossVectors(dir, kt));
+  outQ.setFromRotationMatrix(Mt.multiply(Ml.transpose()));
+  return kn;
+}
+
+// a pose: one quaternion (null = leave as is) per joint, in psJoints order, + pelvis position (or null).
+// Angles as Euler [x, y, z]; arms [x, y, z, elbow]; legs either { fk: [hipX, hipY, hipZ, knee, ankleX, ankleY, ankleZ] }
+// or { ik: ankle position (character space, x = left, y = up, z = forward), pole: knee direction, foot: blade [pitch, yaw, roll] }.
+// An ankle at y 0.11 with a level foot puts the blade on the ice (same contact height as the skating pose).
+function chPose(R, s) {
+  const q = new Array(15).fill(null);
+  const Qb = chQ(s.body || [0, 0, 0]), Qp = chQ(s.pelvis ? s.pelvis.r : [0, 0, 0]);
+  const P = s.pelvis ? new THREE.Vector3(...s.pelvis.p) : null;
+  if (s.pelvis) { q[0] = Qb; q[1] = Qp; }
+  if (s.torso) q[2] = chQ(s.torso);
+  if (s.neck) q[3] = chQ(s.neck);
+  if (s.head) q[4] = chQ(s.head);
+  if (s.armL) { q[5] = chQ(s.armL); q[6] = chQ([s.armL[3], 0, 0]); }
+  if (s.armR) { q[7] = chQ(s.armR); q[8] = chQ([s.armR[3], 0, 0]); }
+  for (const [key, i0, hi] of [['legL', 9, 0], ['legR', 12, 1]]) {
+    const g = s[key];
+    if (!g) continue;
+    if (g.fk) { q[i0] = chQ(g.fk); q[i0 + 1] = chQ([g.fk[3], 0, 0]); q[i0 + 2] = chQ(g.fk.slice(4)); continue; }
+    const Qbp = Qb.clone().multiply(Qp), inv = Qbp.clone().invert();
+    const D = new THREE.Vector3(...g.ik).applyQuaternion(Qb.clone().invert()).sub(P).applyQuaternion(Qp.clone().invert()).sub(CH_HIP[hi]);
+    const hq = new THREE.Quaternion(), kn = chLegIK(R.L, D, new THREE.Vector3(...g.pole).applyQuaternion(inv), hq);
+    const kq = chQ([kn, 0, 0]);
+    q[i0] = hq; q[i0 + 1] = kq;
+    q[i0 + 2] = Qbp.clone().multiply(hq).multiply(kq).invert().multiply(chQ(g.foot || [0, 0, 0]));
+  }
+  return { q, p: P };
+}
+
+const CH_ARMS_OPEN = { armL: [-0.35, 0, 1.15, -0.25], armR: [-0.35, 0, -1.15, -0.25] };
+// key poses (character space; he faces +z, his left is +x). Body turn relative to the travel direction is added
+// separately: Ina Bauer −90° (his left side leads), backward skating / Salchow 180°, I-Spin back to 0° (+ spin).
+const CH_POSES = {
+  open: CH_ARMS_OPEN,
+  // Ina Bauer, upright: feet ~1 m apart on two parallel tracks, toes turned out (left blade forward along the travel
+  // line, right blade backward), front (left) knee bent like a lunge, back (right) leg long and straight
+  ib0: {
+    pelvis: { p: [0, 0.645, 0.02], r: [-0.06, 0, 0] }, torso: [-0.12, 0, 0], neck: [0, 0, 0], head: [0, 0.25, 0],
+    armL: [-0.2, 0, 1.45, -0.15], armR: [-0.2, 0, -1.45, -0.15],
+    legL: { ik: [0.45, 0.11, 0.12], pole: [1, 0.5, 0.25], foot: [0, Math.PI / 2, 0] },
+    legR: { ik: [-0.6, 0.11, -0.03], pole: [-1, -0.2, 0], foot: [0, -Math.PI / 2, 0] },
+  },
+  // Layback Ina Bauer: hips pressed forward, pelvis tipped back, deep backward arch through waist, neck and head,
+  // chest open to the sky, arms raised up and back; same blades on the ice
+  ib: {
+    pelvis: { p: [0, 0.63, 0.07], r: [-0.22, 0, 0] }, torso: [-0.62, 0, 0], neck: [-0.42, 0, 0], head: [-0.25, 0.15, 0],
+    armL: [-0.55, 0, 2.3, -0.15], armR: [-0.55, 0, -2.3, -0.15],
+    legL: { ik: [0.45, 0.11, 0.12], pole: [1, 0.5, 0.25], foot: [0, Math.PI / 2, 0] },
+    legR: { ik: [-0.6, 0.11, -0.03], pole: [-1, -0.2, 0], foot: [0, -Math.PI / 2, 0] },
+  },
+  // out of the Ina Bauer onto the right back edge (he now faces against the travel direction), left leg drawn in
+  bkp: {
+    pelvis: { p: [-0.03, 0.78, 0], r: [0, 0, 0] }, torso: [0.15, 0, 0], neck: [-0.1, 0, 0], head: [0, 0, 0],
+    armL: [-0.3, 0, 1.2, -0.25], armR: [-0.3, 0, -1.2, -0.25],
+    legR: { ik: [-0.1, 0.11, 0], pole: [0, 0, 1], foot: [0, 0, 0.05] },
+    legL: { fk: [-0.35, 0, 0.08, 0.35, 0.3, 0, 0] },
+  },
+  arms: CH_ARMS_OPEN,
+  // Salchow preparation: back inside edge of the left foot (knee bent, blade leaning in), free right leg extended
+  // behind, shoulders checked against the coming rotation, left arm in front, right arm back
+  sp: {
+    pelvis: { p: [0.06, 0.7, 0.02], r: [0.12, 0, 0] }, torso: [0.3, -0.35, 0], neck: [-0.2, 0.2, 0], head: [0, 0.2, 0],
+    armL: [-1.15, 0, 0.55, -0.4], armR: [0.45, 0, -1.0, -0.2],
+    legL: { ik: [0.12, 0.11, 0.05], pole: [0.15, 0, 1], foot: [0, 0, 0.12] },
+    legR: { fk: [0.6, 0, -0.1, 0.2, 0.45, 0, 0] },
+  },
+  // weight transfer: sinks deep into the left knee while the free leg starts its swing around to the side
+  load: {
+    pelvis: { p: [0.07, 0.64, 0.03], r: [0.2, 0, 0] }, torso: [0.42, -0.3, 0], neck: [-0.3, 0.15, 0], head: [0, 0.1, 0],
+    armL: [-0.9, 0, 0.4, -0.6], armR: [0.2, 0, -0.7, -0.4],
+    legL: { ik: [0.12, 0.11, 0.07], pole: [0.15, 0, 1], foot: [0, 0, 0.12] },
+    legR: { fk: [0.2, 0, -0.35, 0.5, 0.45, 0, 0] },
+  },
+  // take-off: left knee drives straight onto the toe, free leg swung forward around, arms pulling in, shoulders unwinding
+  st: {
+    pelvis: { p: [0.04, 0.84, 0], r: [0, 0, 0] }, torso: [0.05, 0.15, 0], neck: [0, 0, 0], head: [0, 0, 0],
+    armL: [-1.1, -0.3, 0.35, -1.2], armR: [-1.0, 0.4, -0.35, -1.2],
+    legL: { ik: [0.1, 0.11, 0], pole: [0, 0, 1], foot: [0.15, 0, 0] },
+    legR: { fk: [-0.75, 0, -0.25, 0.45, 0.4, 0, 0] },
+  },
+  // in the air: compact — legs straight and together (right crossed slightly in front), arms folded at the chest
+  sa: {
+    pelvis: { p: [0, 0.84, 0], r: [0, 0, 0] }, torso: [0.02, 0, 0], neck: [0, 0, 0], head: [0, 0, 0],
+    armL: [-1.45, -0.7, -0.5, -1.2], armR: [-1.35, 1.0, 0.6, -1.2],
+    legL: { fk: [0.05, 0, -0.02, 0.06, 0.35, 0, 0] }, legR: { fk: [-0.12, 0, 0.03, 0.1, 0.35, 0, 0] },
+  },
+  // landing on the right back outside edge: knee bends, left leg extends behind, arms open
+  sl: {
+    pelvis: { p: [-0.04, 0.72, 0], r: [0.1, 0, 0] }, torso: [0.25, 0, 0], neck: [-0.15, 0, 0], head: [0, 0, 0],
+    armL: [-0.25, 0, 1.25, -0.2], armR: [-0.25, 0, -1.25, -0.2],
+    legR: { ik: [-0.12, 0.11, 0.04], pole: [-0.1, 0, 1], foot: [0, 0, 0.1] },
+    legL: { fk: [0.7, 0, 0.14, 0.12, 0.45, 0, 0] },
+  },
+  sla: {   // deepest point of the landing cushion
+    pelvis: { p: [-0.04, 0.64, 0], r: [0.14, 0, 0] }, torso: [0.4, 0, 0], neck: [-0.25, 0, 0], head: [0, 0, 0],
+    armL: [-0.3, 0, 1.15, -0.25], armR: [-0.3, 0, -1.15, -0.25],
+    legR: { ik: [-0.12, 0.11, 0.06], pole: [-0.1, 0, 1], foot: [0, 0, 0.1] },
+    legL: { fk: [0.62, 0, 0.14, 0.35, 0.45, 0, 0] },
+  },
+  // glide-out: the classic landing position held — tall, free leg higher behind, arms wide, chin up
+  gl: {
+    pelvis: { p: [-0.05, 0.76, 0], r: [0.18, 0, 0] }, torso: [0.18, 0, 0], neck: [-0.25, 0, 0], head: [0, 0, 0],
+    armL: [-0.45, 0, 1.45, -0.15], armR: [-0.45, 0, -1.45, -0.15],
+    legR: { ik: [-0.12, 0.11, 0.04], pole: [-0.1, 0, 1], foot: [0, 0, 0.1] },
+    legL: { fk: [0.95, 0, 0.16, 0.08, 0.5, 0, 0] },
+  },
+  // the turn to forward: feet together on the ice, upright, arms a little in
+  mo: {
+    pelvis: { p: [0, 0.8, 0], r: [0, 0, 0] }, torso: [0.12, 0, 0], neck: [-0.08, 0, 0], head: [0, 0, 0],
+    armL: [-0.3, 0, 0.9, -0.3], armR: [-0.3, 0, -0.9, -0.3],
+    legL: { ik: [0.09, 0.11, 0], pole: [0, 0, 1], foot: [0, 0, 0] },
+    legR: { ik: [-0.09, 0.11, 0], pole: [0, 0, 1], foot: [0, 0, 0] },
+  },
+  // spin entry: forward outside edge of the left foot, knee bent, wound up (right arm across in front), free leg behind
+  se: {
+    pelvis: { p: [0.06, 0.7, 0], r: [0.15, 0, 0] }, torso: [0.35, -0.45, 0], neck: [-0.25, 0.3, 0], head: [0, 0, 0],
+    armL: [-0.2, 0, 1.35, -0.2], armR: [-1.3, 0, -0.25, -0.5],
+    legL: { ik: [0.12, 0.11, 0.05], pole: [0.1, 0, 1], foot: [0, 0, -0.1] },
+    legR: { fk: [0.55, 0, -0.12, 0.35, 0.45, 0, 0] },
+  },
+  // the free knee comes up in front and the hands take the leg
+  iu: {
+    pelvis: { p: [0.04, 0.82, -0.02], r: [0, 0, 0] }, torso: [0.12, -0.15, 0], neck: [0, 0, 0], head: [0, 0, 0],
+    armL: [-1.2, 0, 0.2, -1.0], armR: [-1.3, 0, -0.1, -0.9],
+    legL: { ik: [0.1, 0.11, 0], pole: [0, 0, 1], foot: [0, 0, 0] },
+    legR: { fk: [-2.0, 0, -0.2, 1.3, 0.5, 0, 0] },
+  },
+  // I-Spin: straight support leg, upright torso (leaning a touch back / away), free leg pulled up straight in front
+  // beside the head — a tall narrow capital "I"; both hands on the free leg
+  is: {
+    pelvis: { p: [0.02, 0.84, -0.03], r: [-0.08, 0, 0] }, torso: [-0.16, -0.35, -0.1], neck: [0.12, 0.2, 0], head: [0, 0, 0],
+    armL: [-2.6, 0, 0.5, -0.5], armR: [-2.6, 0, -0.3, -0.5],
+    legL: { ik: [0.08, 0.11, 0], pole: [0, 0, 1], foot: [0, 0, 0] },
+    legR: { ik: [-0.28, 1.4, 0.34], pole: [-0.4, 0.1, 1], foot: [-1.1, 0, 0] },
+  },
+  // leg released and lowered: upright spin, free leg crossed low in front, arms in (slowing down)
+  up: {
+    pelvis: { p: [0.02, 0.84, 0], r: [0, 0, 0] }, torso: [0.05, 0, 0], neck: [0, 0, 0], head: [0, 0, 0],
+    armL: [-1.25, 0, 0.3, -1.5], armR: [-1.25, 0, -0.3, -1.5],
+    legL: { ik: [0.08, 0.11, 0], pole: [0, 0, 1], foot: [0, 0, 0] },
+    legR: { fk: [-0.28, 0, -0.04, 0.45, 0.45, 0, 0] },
+  },
+  // exit: glides out on the left foot, free leg extended behind, arms wide open
+  ex: {
+    pelvis: { p: [0.05, 0.76, 0], r: [0.12, 0, 0] }, torso: [0.22, 0, 0], neck: [-0.3, 0, 0], head: [0, 0, 0],
+    armL: [-0.4, 0, 1.55, -0.12], armR: [-0.4, 0, -1.55, -0.12],
+    legL: { ik: [0.11, 0.11, 0.03], pole: [0, 0, 1], foot: [0, 0, 0] },
+    legR: { fk: [0.85, 0, -0.12, 0.1, 0.5, 0, 0] },
+  },
+};
+// timeline: each key fades in over [start, end] (smoothstep) on top of everything before it
+const CH_KEYS = [
+  ['open', 0.1, 1.3],
+  ['ib0', 2.6, 4.2], ['ib', 4.2, 5.4], ['ib0', 7.9, 8.7],             // Layback Ina Bauer (held ≈2.5 s at full arch)
+  ['bkp', 8.7, 10.0], ['@back', 10.0, 11.0], ['arms', 10.0, 11.0],      // onto the right back edge, backward skating
+  ['sp', 12.4, 13.7], ['load', 13.75, 14.2], ['st', 14.22, 14.45],     // Salchow: preparation → load → take-off
+  ['sa', 14.45, 14.62], ['sl', 14.98, 15.16], ['sla', 15.16, 15.34],  // air → touch down → cushion
+  ['sl', 15.34, 15.6], ['gl', 15.6, 16.4],                             // → glide-out
+  ['mo', 18.1, 18.8], ['se', 19.0, 20.0],                              // turn forward, spin entry
+  ['iu', 20.3, 21.1], ['is', 21.1, 22.1], ['up', 25.2, 26.1],          // I-Spin
+  ['ex', 26.7, 27.5], ['@base', 27.7, CH.END],                         // exit → his normal skating
+];
+// (2026-11-05) Salchow preparation shortened by 1.5 s: backward stroking 11.0–13.4 → 11.0–12.4 (−1.0 s) and the
+// preparation glide eases in over 1.3 s instead of 1.8 s (−0.5 s). Load, take-off, air, landing and everything after
+// keep their exact durations, only 1.5 s earlier.
+// which blade carries him (pinned under the root) — null: none (stroking, in the air)
+const chPinAt = (t) => t < 2.6 ? null : t < 8.7 ? 'L' : t < 10.0 ? 'R' : t < 12.4 ? null : t < CH.jump[0] ? 'L'
+  : t < CH.jump[1] ? null : t < 18.9 ? 'R' : t < 27.7 ? 'L' : null;
+
+class Choreography {
+  constructor(player, onEnd) {
+    this.P = player; this.R = player.rig; this.onEnd = onEnd;
+    this.t = 0; this.vmax = 27; this.theta = 0;
+    this.J = psJoints(this.R);
+    this.poses = {};
+    for (const k in CH_POSES) this.poses[k] = chPose(this.R, CH_POSES[k]);
+    const mk = () => ({ q: this.J.map(() => new THREE.Quaternion()), p: new THREE.Vector3() });
+    this.base = mk(); this.back = mk(); this.sm = null;
+    this.pin = null; this.off = new THREE.Vector2();
+    // I-Spin turn rate: whole turns only, so he faces his travel direction again exactly when it stops
+    const [a, b, c, d] = CH.spin;
+    this.rate = (t) => psSm(a, b, t) * (1 - psSm(c, d, t));
+    let area = 0;
+    for (let t = a; t < d; t += 1 / 240) area += this.rate(t) / 240;
+    this.k = (Math.max(1, Math.round((CH.spinPeak * area) / (Math.PI * 2))) * Math.PI * 2) / area;
+    this._v = new THREE.Vector3(); this._w = new THREE.Vector3();
+  }
+  _snap(dst) { this.J.forEach((j, i) => dst.q[i].copy(j.quaternion)); dst.p.copy(this.R.pelvis.position); }
+  _blend(pose, w) {
+    if (!(w > 0)) return;
+    const J = this.J;
+    for (let i = 0; i < J.length; i++) if (pose.q[i]) J[i].quaternion.slerp(pose.q[i], w);
+    if (pose.p) this.R.pelvis.position.lerp(pose.p, w);
+  }
+  // blade contact point of a leg in the skater's own (root) space
+  _blade(leg, out) {
+    this.P.mesh.updateMatrixWorld(true);
+    return this.P.mesh.worldToLocal(leg.ankle.localToWorld(out.set(0, -this.R.L.foot, 0.03)));
+  }
+  _toWorld(x, z, out) {                                    // root-space offset → world offset (yaw only)
+    const h = this.P.mesh.rotation.y, c = Math.cos(h), s = Math.sin(h);
+    return out.set(x * c + z * s, 0, -x * s + z * c);
+  }
+
+  step(dt) {
+    const P = this.P, R = this.R, J = this.J;
+    this.t = Math.min(CH.END, this.t + dt);
+    const t = this.t;
+    // top speed: eases down to 9 m/s for the jump and 3.5 m/s for the spin, then back to 27 (steering is never limited)
+    const lim = (v, a, b, c, d) => 27 + (v - 27) * psSm(a, b, t) * (1 - psSm(c, d, t));
+    this.vmax = Math.min(lim(9, 12.9, 13.7, 15.5, 16.3), lim(3.5, 19.1, 20.2, 26.9, 27.9));
+
+    // his normal skating pose as computed this step (clear the components the skating code never writes)
+    R.body.rotation.x = R.body.rotation.y = 0;
+    R.pelvis.quaternion.identity(); R.pelvis.position.z = 0;
+    R.head.rotation.x = R.head.rotation.y = 0;
+    for (const arm of [R.armL, R.armR]) arm.elbow.rotation.y = arm.elbow.rotation.z = 0;
+    for (const leg of [R.legL, R.legR]) { leg.knee.rotation.y = leg.knee.rotation.z = 0; leg.ankle.rotation.y = 0; }
+    this._snap(this.base);
+    psLegsBackward(R, 1);                                  // the same skating, stroked backward (partner Help helper)
+    this._snap(this.back);
+    this._blend(this.base, 1);
+
+    // key poses, cross-faded in order
+    for (const [name, a, b] of CH_KEYS) {
+      if (t <= a) break;
+      const pose = name === '@base' ? this.base : name === '@back' ? this.back : this.poses[name];
+      this._blend(pose, psSm(a, b, t));
+    }
+    // follow-through: joints chase the target pose a little (no snapping, softer starts / stops)
+    if (!this.sm) this.sm = { q: J.map((j) => j.quaternion.clone()), p: R.pelvis.position.clone() };
+    const kS = 1 - Math.exp(-dt * 20);
+    J.forEach((j, i) => { this.sm.q[i].slerp(j.quaternion, kS); j.quaternion.copy(this.sm.q[i]); });
+    this.sm.p.lerp(R.pelvis.position, kS); R.pelvis.position.copy(this.sm.p);
+
+    // body turn about the vertical axis: sideways (Ina Bauer) → backward → +1 turn (Salchow) → forward → spin
+    const [j0, j1] = CH.jump, u = psClamp01((t - j0) / (j1 - j0));
+    const eJump = 0.4 * u + 0.6 * psSmoother(u);           // exactly 360°, already turning as he leaves the ice
+    if (t > CH.spin[0] && t < CH.spin[3]) this.theta += this.k * this.rate(t) * dt;
+    else if (t >= CH.spin[3]) this.theta = Math.round(this.theta / (Math.PI * 2)) * Math.PI * 2;
+    const yaw = -Math.PI / 2 * psSm(2.7, 4.1, t) - Math.PI / 2 * psSm(8.8, 10.0, t) + Math.PI * 2 * eJump
+      + Math.PI * psSm(18.4, 19.4, t) + this.theta;
+    P.mesh.rotation.y = P.heading + yaw;
+    P.mesh.position.y = P.bounds.iceY + (t > j0 && t < j1 ? CH.jumpH * 4 * u * (1 - u) : 0);
+
+    // I-Spin: both hands on the free leg (right hand at the boot, left hand at the knee — below his face)
+    const grip = psSm(20.8, 21.9, t) * (1 - psSm(25.0, 25.7, t));
+    if (grip > 0.001) {
+      P.mesh.updateMatrixWorld(true);
+      const boot = R.legR.ankle.localToWorld(new THREE.Vector3(-0.05, 0.08, -0.02));
+      const shin = R.legR.knee.localToWorld(new THREE.Vector3(0.08, 0.02, 0.05));
+      psArmIK(R, R.armR, -1, boot, grip, new THREE.Vector3(-1, -0.2, -0.3));
+      psArmIK(R, R.armL, 1, shin, grip, new THREE.Vector3(1, -0.4, -0.2));
+    }
+
+    // pinned blade: the root sits on it (re-rooting moves nothing on screen)
+    const leg = (s) => (s === 'L' ? R.legL : R.legR);
+    if (this.pin) { const p = this._blade(leg(this.pin), this._v); this.off.set(-p.x, -p.z); }
+    const want = t >= CH.END ? null : chPinAt(t);
+    if (want !== this.pin) {
+      if (this.pin) { P.mesh.position.add(this._toWorld(this.off.x, this.off.y, this._w)); this.off.set(0, 0); }   // root back under the body
+      this.pin = want;
+      if (want) { const p = this._blade(leg(want), this._v); P.mesh.position.add(this._toWorld(p.x, p.z, this._w)); this.off.set(-p.x, -p.z); }
+    }
+    R.pelvis.position.x += this.off.x; R.pelvis.position.z += this.off.y;
+    // the lower blade at the usual ice-contact height (as in the Spin; after the pin shift, which can tilt with his lean)
+    const a = this._blade(R.legL, this._v), b = this._blade(R.legR, this._w);
+    R.pelvis.position.y += -0.02 - Math.min(a.y, b.y);
+
+    if (t >= CH.END) {                                       // back to his normal skating (pose already blended in)
+      P.mesh.rotation.y = P.heading;                         // (whole turns: same facing)
+      P.mesh.position.y = P.bounds.iceY;
+      R.pelvis.quaternion.identity(); R.pelvis.position.z = 0;
+      P.routine = null;
+      if (this.onEnd) this.onEnd();
+    }
+  }
+}
+
 // ===== story/roseProposal.js =====
 // (2026-11-03) White Rose Collection + "Ask Out" proposal sequence.
 //  - RoseCollector: the 10 existing exterior roses (world.roses) become individually clickable → "Pick Up" button
@@ -4762,7 +5189,7 @@ class ProposalSequence {
 
   start() {
     const P = this.player;
-    if (this.active || (this.done && !this.allowReplay) || P.trick || P.spin || this.partner.mode === 'dance') return false;
+    if (this.active || (this.done && !this.allowReplay) || P.trick || P.spin || P.routine || this.partner.mode === 'dance') return false;
     this.active = true;
     this.t = 0;
     this.snapped = false;
@@ -5560,7 +5987,7 @@ askBtn.addEventListener('click', (e) => {
   askBtn.blur();
   if (proposal.active) return;
   if (!ASK_OUT_TEST_UNLOCK && roseCollector.count < roseCollector.total) { STORY_UI.toast('하얀 장미 10 송이를 모으면 고백할 수 있어요.', 3); return; }
-  if (player.trick || player.spin || partner.mode === 'dance') return;
+  if (player.trick || player.spin || player.routine || partner.mode === 'dance') return;
   partner.closeMenu();
   roseCollector.close();
   if (proposal.start()) updateAskOut();
@@ -5575,7 +6002,7 @@ controls.onTap = (ray) => {
   return partner.handleTap(ray);
 };
 
-// ---- bottom action bar (2026-11-03): 축하하기 · 스핀돌기 · 트리플악셀 ----------------------------------------
+// ---- bottom action bar (2026-11-03): 안무 연습 · 스핀돌기 · 트리플악셀 (2026-11-05: 축하하기 → 안무 연습) ---------------
 const actionBar = document.createElement('div');
 actionBar.style.cssText = [
   'position:fixed', 'left:50%', 'bottom:calc(20px + env(safe-area-inset-bottom))', 'transform:translateX(-50%)', 'z-index:10', 'display:flex',
@@ -5600,27 +6027,27 @@ function actionLabel(btn, text) {
   btn.replaceChildren(span);
 }
 
-// 축하하기: ~10 s of confetti tossing while skating on (arms only; movement keeps working)
-const celebration = new Celebration({ player, scene, iceY: world.bounds.iceY });
-celebration.setViewportHeight(renderer.getDrawingBufferSize(new THREE.Vector2()).y);
-const celebrateBtn = document.createElement('button');
-actionLabel(celebrateBtn, '축하하기');
-celebrateBtn.style.cssText = ACTION_BTN_CSS;
-celebrateBtn.addEventListener('click', () => {
-  celebrateBtn.blur();
-  if (celebrateBtn.disabled || celebration.active || proposal.active || player.trick || player.spin) return;
-  partner.cancel();                     // Help / Hold Hands: let go first (both hands are needed)
-  celebration.start();
+// 안무 연습 (2026-11-05, replaces 축하하기): ~29 s routine — Layback Ina Bauer → Salchow → I-Spin — while he keeps
+// steering (joystick / WASD / tap). One at a time: the action buttons rest until it has finished.
+// (The Celebration class above is kept in the file but no longer used.)
+const routineBtn = document.createElement('button');
+actionLabel(routineBtn, '안무 연습');
+routineBtn.style.cssText = ACTION_BTN_CSS;
+routineBtn.addEventListener('click', () => {
+  routineBtn.blur();
+  if (routineBtn.disabled || proposal.active || player.trick || player.spin || player.routine || partner.mode === 'dance') return;
+  partner.cancel();                     // Help / Hold Hands: let go first (the routine needs both arms)
+  if (player.startRoutine(() => setActionBusy(false))) setActionBusy(true);
 });
 
-// 스핀돌기 / 트리플악셀: the existing Spin and Triple Axel (unchanged); starting either ends a celebration
+// 스핀돌기 / 트리플악셀: the existing Spin and Triple Axel (unchanged)
 const spinBtn = document.createElement('button');
 actionLabel(spinBtn, '스핀돌기');
 spinBtn.style.cssText = ACTION_BTN_CSS;
 spinBtn.addEventListener('click', () => {
   if (spinBtn.disabled) return;
   partner.cancel();                     // Help / Hold Hands: let go first, then spin
-  if (player.startSpin(() => setActionBusy(false))) { setActionBusy(true); celebration.stop(); }
+  if (player.startSpin(() => setActionBusy(false))) setActionBusy(true);
   spinBtn.blur();
 });
 const axelBtn = document.createElement('button');
@@ -5630,14 +6057,31 @@ axelBtn.addEventListener('click', () => {
   if (axelBtn.disabled) return;
   partner.cancel();                     // Help / Hold Hands: let go first, then jump
   const started = player.startTripleAxel(() => setActionBusy(false));
-  if (started) { setActionBusy(true); celebration.stop(); }
+  if (started) setActionBusy(true);
   axelBtn.blur();
 });
-actionBar.append(celebrateBtn, spinBtn, axelBtn);
-for (const b of [celebrateBtn, spinBtn, axelBtn]) b.className = 'action-btn';
+actionBar.append(routineBtn, spinBtn, axelBtn);
+for (const b of [routineBtn, spinBtn, axelBtn]) b.className = 'action-btn';
 // one action at a time: while the Triple Axel, the Spin, the partner dance or the proposal runs, the buttons rest
 function setActionBusy(b) {
-  for (const btn of [celebrateBtn, axelBtn, spinBtn]) { btn.disabled = b; btn.style.opacity = b ? '0.4' : '1'; }
+  for (const btn of [routineBtn, axelBtn, spinBtn]) { btn.disabled = b; btn.style.opacity = b ? '0.4' : '1'; }
+}
+
+// ---- joystick (2026-11-05): bottom-left, touch + mouse (desktop too); camera-relative skating direction -------
+// Pushing the stick toward the top of the screen skates the way the camera looks; the amount past the dead zone
+// sets how hard he pushes and how fast he may go (same limits as the keys). Ignored during the proposal and the
+// partner dance (those drive him themselves). Desktop WASD / mouse / tap are unchanged.
+const joystick = new TouchJoystick();
+const _joyF = new THREE.Vector3(), _joyStick = { x: 0, z: 0, m: 0 };
+function feedJoystick() {
+  if (!(joystick.m > 0) || proposal.active || partner.mode === 'dance') { player.stick = null; return; }
+  camera.getWorldDirection(_joyF); _joyF.y = 0;
+  if (_joyF.lengthSq() < 1e-8) _joyF.set(Math.sin(player.heading), 0, Math.cos(player.heading));
+  _joyF.normalize();
+  const x = -_joyF.z * joystick.x + _joyF.x * joystick.y, z = _joyF.x * joystick.x + _joyF.z * joystick.y;   // screen right = (−f.z, f.x)
+  const l = Math.hypot(x, z) || 1;
+  _joyStick.x = x / l; _joyStick.z = z / l; _joyStick.m = joystick.m;
+  player.stick = _joyStick;
 }
 
 // ---- post: HDR target with MSAA → bloom → tone mapping ---------------------
@@ -5720,7 +6164,7 @@ function onResize() {
   if (typeof skateFx !== 'undefined') skateFx.setViewportHeight(b.y);
   if (typeof skateFx2 !== 'undefined') skateFx2.setViewportHeight(b.y);
   if (typeof roseCollector !== 'undefined') roseCollector.setViewportHeight(b.y);
-  if (typeof celebration !== 'undefined') celebration.setViewportHeight(b.y);
+  if (typeof joystick !== 'undefined') joystick.onResize();
 }
 window.addEventListener('resize', onResize);
 // phones: orientation changes / browser bars report their final size a moment later
@@ -5740,6 +6184,7 @@ let simAcc = 0;
 let last = performance.now();
 const start = last;
 function simulate(frameDt, t) {
+  feedJoystick();
   simAcc += Math.min(frameDt, MAX_CATCH_UP);
   let dt = 0;
   while (simAcc >= SIM_STEP) {
@@ -5748,7 +6193,6 @@ function simulate(frameDt, t) {
       if (!partner.preUpdate(SIM_STEP)) player.update(SIM_STEP);   // the dance drives the player itself; otherwise normal control
       partner.postUpdate(SIM_STEP);
       proposal.afterStep(SIM_STEP);                               // (eases both rigs back for 0.8 s after the proposal)
-      celebration.afterStep(SIM_STEP);                            // 축하하기: arms layered on the skating pose
     }
     simAcc -= SIM_STEP;
     dt += SIM_STEP;
@@ -5760,9 +6204,6 @@ function simulate(frameDt, t) {
     roseCollector.update(dt);
     skateFx.update(dt);
     skateFx2.update(dt);
-    // a celebration ends if something else takes over his arms (partner modes, the proposal, a jump / spin)
-    if (celebration.active && (proposal.active || partner.mode || partner.H.active || player.trick || player.spin)) celebration.stop();
-    celebration.update(dt);
   }
   world.update(t);
 }
