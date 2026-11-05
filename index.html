@@ -127,7 +127,7 @@ const RINK = {
   rx: 66.6,     // overall half-length (x)
   rz: 33.3,     // overall half-width  (z)
   iceY: 0.03,
-  boardHeight: 0.9,
+  boardHeight: 0.45,   // (2026-11-04: 50% of 0.9 m)
   boardThickness: 0.35,
 };
 
@@ -747,7 +747,7 @@ function heightAt(x, z) {
   const e = rinkDist(x, z);                                              // metres outside the boards
   const t = THREE.MathUtils.smoothstep(e, 16, 72);
   const n = 0.55 + 0.25 * Math.sin(x * 0.021 + 1.3) * Math.cos(z * 0.027 - 0.4) + 0.2 * Math.sin(x * 0.009 - z * 0.012 + 2.1);
-  return t * Math.max(0, n) * 14;                                        // up to ~14 m, soft and broad
+  return t * Math.max(0, n) * 7;                                         // up to ~7 m, soft and broad (2026-11-04: 50% of 14 m)
 }
 
 function createGround({ glow }) {
@@ -788,8 +788,8 @@ function createGround({ glow }) {
   // glow), fogged like everything else; the farther layer is darker and less saturated. Main camera only.
   const shadeDir = new THREE.Vector3(-0.45, 0.7, -0.55).normalize();
   for (const L of [
-    { R: 165, H: [22, 38], seed: 1.3, lit: 0x5a5f8c, dark: 0x2c3157 },   // nearer back layer: soft lavender-navy snow
-    { R: 255, H: [40, 66], seed: 4.1, lit: 0x343a66, dark: 0x1c2142 },   // farthest: darker, greyer, flatter in tone
+    { R: 165, H: [11, 19], seed: 1.3, lit: 0x5a5f8c, dark: 0x2c3157 },   // nearer back layer: soft lavender-navy snow (2026-11-04: 50% height)
+    { R: 255, H: [20, 33], seed: 4.1, lit: 0x343a66, dark: 0x1c2142 },   // farthest: darker, greyer, flatter in tone (50% height)
   ]) {
     const SEGS = 180, rows = [[-34, -0.25], [-16, 0.5], [-6, 0.86], [0, 1], [7, 0.9], [20, 0.55], [44, 0.08]];
     const hp = [], hc = [], hi = [];
@@ -816,7 +816,7 @@ function createGround({ glow }) {
     const nr = hg.attributes.normal, c = new THREE.Color();
     for (let v = 0; v < nr.count; v++) {
       const w = Math.min(1, Math.max(0, (nr.getX(v) * shadeDir.x + nr.getY(v) * shadeDir.y + nr.getZ(v) * shadeDir.z) * 0.6 + 0.45));
-      c.copy(dark).lerp(lit, w);
+      c.copy(dark).lerp(lit, w).multiplyScalar(0.85);                // (2026-11-04: ~10% darker, like the rest outside)
       hc.push(c.r, c.g, c.b);
     }
     hg.setAttribute('color', new THREE.Float32BufferAttribute(hc, 3));
@@ -854,7 +854,10 @@ const EXT = {
 };
 
 // MeshStandardMaterial + the existing warm bulb glow (glow.patch) + the exterior cool fill / flake glow
-function exteriorMaterial(params, glow, Ctor = THREE.MeshStandardMaterial) {
+// (2026-11-04) everything outside the rink drawn with this material is ~10% darker on screen (EXT_DIM 0.85 on the
+// light ≈ −10% displayed brightness, measured); the white roses keep their own factor (no dimming) and a faint glow
+const EXT_DIM = { value: 0.85 };
+function exteriorMaterial(params, glow, Ctor = THREE.MeshStandardMaterial, dim = EXT_DIM) {
   const m = glow.patch(new Ctor(params), 1);
   const warm = m.onBeforeCompile;
   m.onBeforeCompile = (sh, r) => {
@@ -863,8 +866,9 @@ function exteriorMaterial(params, glow, Ctor = THREE.MeshStandardMaterial) {
     sh.uniforms.uCoolPt = EXT.coolPt;
     sh.uniforms.uCoolCol = EXT.coolCol;
     sh.uniforms.uExtDirect = EXT.direct;
-    sh.fragmentShader = 'uniform vec3 uExtSky;\nuniform vec4 uCoolPt;\nuniform vec3 uCoolCol;\nuniform float uExtDirect;\n' +
-      sh.fragmentShader.replace('#include <lights_fragment_end>', `#include <lights_fragment_end>
+    sh.uniforms.uExtDim = dim;
+    sh.fragmentShader = 'uniform vec3 uExtSky;\nuniform vec4 uCoolPt;\nuniform vec3 uCoolCol;\nuniform float uExtDirect;\nuniform float uExtDim;\n' +
+      sh.fragmentShader.replace('#include <opaque_fragment>', 'outgoingLight *= uExtDim;\n#include <opaque_fragment>').replace('#include <lights_fragment_end>', `#include <lights_fragment_end>
       {
         vec3 exN = inverseTransformDirection( normal, viewMatrix );            // world-space normal
         vec3 cD = vWarmWorld - uCoolPt.xyz;
@@ -1474,10 +1478,13 @@ function createWinterScenery({ glow, renderer }) {
   ];
   // each whole rose leans toward the rink interior (radially, from its own spot) by a fixed 10–15° angle
   const ROSE_TILT_DEG = [12, 14, 10.5, 13, 11, 15, 12.5, 10, 13.5, 11.5];
+  // (2026-11-04) a barely-there glow on the roses: a little more of their own soft warm-white emission (≈ +5% brightness, measured)
+  const ROSE_GLOW = { emissive: 0.5 + 0.8 };
   const roseItems = [], roseRef = { items: roseItems };              // handed to the rose-collection system (main.js)
   {
     const r3 = mulberry32(5150), parts = createRoseGeometry();
-    const roseMat = exteriorMaterial({ color: 0xf7f4ef, roughness: 0.82, emissive: 0x34322f, emissiveIntensity: 0.5 }, glow);   // soft white clay
+    const roseMat = exteriorMaterial({ color: 0xf7f4ef, roughness: 0.82, emissive: 0x34322f, emissiveIntensity: ROSE_GLOW.emissive }, glow,
+      THREE.MeshStandardMaterial, { value: 1 });                     // soft white clay; not dimmed with the surroundings (2026-11-04)
     const leafMat = exteriorMaterial({ color: 0x5a8f63, roughness: 0.8, side: THREE.DoubleSide }, glow);                      // muted natural green (thin leaves: both sides)
     const heads = new THREE.InstancedMesh(parts.head, roseMat, ROSES.length);
     roseItems.length = 0;
@@ -2454,6 +2461,10 @@ function buildSkater({ style = 'skater' } = {}) {
     lace: new THREE.MeshStandardMaterial({ color: 0xe1e2e8, roughness: 0.85, metalness: 0 }),
   };
   const sm01 = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
+  // (2026-11-05) male hair colour matched to the reference: on screen under the rink's warm lights this shows as a
+  // deep warm chocolate brown ≈ #573427 (reference #5b3328, measured median); same smooth matte clay material
+  // (2026-11-05) the partner uses the very same hair colour / material values as the male skater
+  C.hair.color.setHex(0x575a5c);
   // upper body −10% (waist → neck 0.49 → 0.441): only the chest band between the pocket (y 0.1) and the
   // shoulders (y 0.3) is shortened; pocket and hem stay put, shoulders / hood / collar / neck move down unchanged
   const TY = (y) => y - 0.049 * sm01(0.1, 0.3, y);
@@ -2485,8 +2496,30 @@ function buildSkater({ style = 'skater' } = {}) {
   const face = new THREE.Group();
   face.position.y = 0.035;
   face.scale.set(1.04, 0.97, 0.98);
+  // (2026-11-05, v2) male skater only: a round, softly plump head with a 1:1 front silhouette (hair top → chin vs
+  // width, measured: 1.00) like the reference (left-swept short bang). Width 1.04 → 0.96 (−7.7%), height 0.97 → 0.96;
+  // depth unchanged; the chin stays where it was on the collar. Below eye level the cheeks / jaw round off gently
+  // into a soft chin (JAW, 6%). Eyes and ears are counter-scaled so their size and shape stay exactly as before.
+  // (2026-11-05) the partner now shares exactly the same head / face proportions (scale, jaw, chin); her own hair,
+  // ponytail, pearl tie and earmuffs keep their shape and size (see girl block)
+  const MALE_HEAD = { sx: 0.96, sy: 0.96, sz: 0.98 };   // (name kept; used by both skaters)
+  if (MALE_HEAD) {
+    face.scale.set(MALE_HEAD.sx, MALE_HEAD.sy, MALE_HEAD.sz);
+    face.position.y = 0.035 + HR * (MALE_HEAD.sy - 0.97);
+  }
+  const JAW = (g) => {                                   // gentle rounded taper of the lower face (both skaters)
+    const p = g.attributes.position, v = new THREE.Vector3();
+    for (let i = 0; i < p.count; i++) {
+      v.fromBufferAttribute(p, i);
+      const y = v.y / HR;                                // −1 (chin) … 1 (crown)
+      const k = 1 - 0.06 * sm01(-0.28, -0.95, y);        // cheeks → jaw: up to 6% narrower, smoothly (round, plump cheeks)
+      p.setXYZ(i, v.x * k, v.y, v.z * (1 - 0.02 * sm01(-0.3, -0.95, y)));
+    }
+    g.computeVertexNormals();
+    return g;
+  };
   head.add(face);
-  face.add(new THREE.Mesh(new THREE.SphereGeometry(HR, 96, 64), C.skin));
+  face.add(new THREE.Mesh(JAW(new THREE.SphereGeometry(HR, 96, 64)), C.skin));
   {
     // hair = the head sphere pushed out where hair grows (a single mass, no stuck-on pieces):
     // low side-swept fringe with rounded lock tips, full volume on top and sides, tapered nape
@@ -2497,12 +2530,15 @@ function buildSkater({ style = 'skater' } = {}) {
       const lon = Math.atan2(d.x, d.z);                          // 0 = front
       const al = Math.abs(lon), front = 1 - sm01(0.75, 1.2, al), back = sm01(1.5, 2.15, al);
       // chunky locks: rounded tips with small V notches between them (more, smaller locks on the fringe)
-      const tipsF = 1 - Math.abs(Math.sin(lon * 7 + 0.9)), tipsS = 1 - Math.abs(Math.sin(lon * 6 + 0.4));
+      // male (2026-11-05): three broad fringe locks; the partings between them run diagonally (swept toward his right)
+      const lockU = lon * 3.6 + 0.9 + 1.6 * (d.y - 0.1), lockS = Math.sin(lockU);
+      const tipsF = girl ? 1 - Math.abs(Math.sin(lon * 7 + 0.9)) : 1 - Math.abs(lockS);
+      const tipsS = girl ? 1 - Math.abs(Math.sin(lon * 6 + 0.4)) : 1 - Math.abs(Math.sin(lon * 3.2 + 0.4));
       const tips = tipsF * front + tipsS * (1 - front);
       const burn = Math.exp(-(((Math.abs(lon) - 1.12) / 0.2) ** 2));   // side locks falling in front of the ears
       const cutFront = girl
         ? 0.56 - 0.55 * sm01(0.0, 0.42, Math.abs(d.x)) + 0.12 * sm01(0.5, 0.85, Math.abs(d.x)) + 0.02 * (1 - tips) ** 2   // (cut line +0.1 = ~10% shorter, clear of the eyes) two bangs parted in the middle, sweeping down and out to each side
-        : 0.0 + 0.2 * d.x + 0.11 * (1 - tips) ** 2;     // long fringe sweeping lower toward one side
+        : 0.04 + 0.24 * d.x + 0.16 * (1 - tips) ** 2;   // male (2026-11-05): broad rounded locks sweeping down toward his right (viewer's left)
       const cutSide = 0.03 - 0.18 * burn + 0.06 * (1 - tips) ** 1.5;
       const cutBack = -0.68 + 0.06 * (1 - tips) ** 1.5;
       const cut = (cutSide + (cutBack - cutSide) * back) * (1 - front) + cutFront * front;
@@ -2510,17 +2546,19 @@ function buildSkater({ style = 'skater' } = {}) {
       const cover = sm01(-0.03, 0.045, above);                       // soft, smooth hair edge
       const hug = 0.3 + 0.7 * sm01(0.0, 0.32, above);                 // lock ends curl in toward the head
       const bangs = girl ? front * (0.018 * sm01(0.03, 0.25, Math.abs(d.x)) - 0.012 * Math.exp(-((d.x / 0.035) ** 2)) * sm01(0.1, 0.5, d.y)) : 0;   // each bang a soft swell, a neat parting between them
-      const thick = (0.03 + 0.03 * sm01(-0.3, 0.85, d.y) + 0.008 * front + bangs) * hug;   // smooth (no strand grooves)
+      const parting = girl ? 0 : 0.007 * front * Math.exp(-((lockS / 0.14) ** 2)) * sm01(0.0, 0.12, above);   // male: two soft partings between the locks
+      const thick = (0.03 + 0.03 * sm01(-0.3, 0.85, d.y) + 0.008 * front + bangs - parting) * hug;   // smooth (no strand grooves)
       const r = HR * 0.975 + cover * (HR * 0.025 + thick);
       p.setXYZ(i, d.x * r, d.y * r, d.z * r);
     }
     g.computeVertexNormals();
-    face.add(new THREE.Mesh(g, C.hair));
+    face.add(new THREE.Mesh(JAW(g), C.hair));                      // (male: the nape follows the same gentle taper)
   }
   // ears: small flattened round ears at eye level, partly under the hair
   for (const sx of [-1, 1]) {
     const ear = new THREE.Mesh(new THREE.SphereGeometry(0.058, 40, 28), C.skin);
     ear.scale.set(0.62, 1.0, 0.85);
+    if (MALE_HEAD) ear.scale.multiply(new THREE.Vector3(1.04 / MALE_HEAD.sx, 0.97 / MALE_HEAD.sy, 1));   // same ear as before
     ear.position.set(sx * HR * 1.0, -0.05, -0.025);
     face.add(ear);
   }
@@ -2529,6 +2567,7 @@ function buildSkater({ style = 'skater' } = {}) {
   for (const sx of [-1, 1]) {                                 // small glossy oval eyes, set low and wide
     const eye = new THREE.Mesh(new THREE.SphereGeometry(0.0225, 32, 24), C.eye);   // ~18% bigger, rounder (same spot)
     eye.scale.set(0.96, 1.16, 0.5);
+    if (MALE_HEAD) eye.scale.multiply(new THREE.Vector3(1.04 / MALE_HEAD.sx, 0.97 / MALE_HEAD.sy, 1));   // same eye size / shape as before
     eye.position.copy(onFace(0.34 * sx, -0.17, 0.92, 0.997));
     facing(eye, eye.position);
     face.add(eye);
@@ -2550,7 +2589,7 @@ function buildSkater({ style = 'skater' } = {}) {
     for (const sx of [-1, 1]) {
       const dir = new THREE.Vector3(0.5 * sx, -0.31, 0.8).normalize();
       const th = Math.acos(dir.y), ph = Math.atan2(dir.z, -dir.x), w = 0.24;
-      const patch = new THREE.Mesh(new THREE.SphereGeometry(HR * 1.0025, 24, 24, ph - w, 2 * w, th - w, 2 * w), blushMat);
+      const patch = new THREE.Mesh(JAW(new THREE.SphereGeometry(HR * 1.0025, 24, 24, ph - w, 2 * w, th - w, 2 * w)), blushMat);   // (follows the jaw taper)
       patch.renderOrder = 2;
       face.add(patch);
     }
@@ -2575,10 +2614,13 @@ function buildSkater({ style = 'skater' } = {}) {
       }
     }
     tg.computeVertexNormals();
-    face.add(new THREE.Mesh(tg, C.hair));
+    const keep = new THREE.Group();                      // (2026-11-05) undo the new head scale: ponytail + pearl tie stay exactly as before
+    keep.scale.set(1.04 / MALE_HEAD.sx, 0.97 / MALE_HEAD.sy, 0.98 / MALE_HEAD.sz);
+    face.add(keep);
+    keep.add(new THREE.Mesh(tg, C.hair));
     const tipBall = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 18), C.hair);
     curve.getPointAt(1, c); tipBall.position.copy(c); tipBall.scale.setScalar(0.004);   // just closes the rounded end's pole
-    face.add(tipBall);
+    keep.add(tipBall);
     // pearl hair tie: a neat ring of small luminous ivory pearls with a silvery sheen around the ponytail base
     {
       const pearl = new THREE.MeshPhysicalMaterial({
@@ -2594,7 +2636,7 @@ function buildSkater({ style = 'skater' } = {}) {
       }
       tie.position.copy(curve.getPointAt(0.1));
       tie.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), curve.getTangentAt(0.1));   // band wraps around the tail
-      face.add(tie);
+      keep.add(tie);
     }
 
     // ivory fluffy earmuffs: two soft round covers over the ears + a simple curved headband over the hair
@@ -2609,8 +2651,9 @@ function buildSkater({ style = 'skater' } = {}) {
     fg.computeVertexNormals();
     for (const sx of [-1, 1]) {
       const muff = new THREE.Mesh(fg, fur);
-      muff.scale.set(0.0575, 0.1035, 0.0955);              // 15% larger (inner face kept at the same distance from the head)
-      muff.position.set(sx * 0.3225, -0.045, -0.025);
+      muff.scale.set(0.0575 * 1.04 / MALE_HEAD.sx, 0.1035 * 0.97 / MALE_HEAD.sy, 0.0955);   // 15% larger; same size as before the head change
+      // inner face kept at the same gap from the (now narrower) head as before: 1.04 * (0.3225 − 0.0575 − HR)
+      muff.position.set(sx * (HR * MALE_HEAD.sx + 1.04 * (0.3225 - 0.0575 - HR) + 0.0575 * 1.04) / MALE_HEAD.sx, -0.045, -0.025);
       face.add(muff);
     }
     const arc = [];
@@ -3647,7 +3690,7 @@ class SkateFX {
 // shoulder/elbow joints, so joint names, lengths and axes are untouched. Hands meet at one shared
 // clasp point that is kept within both arms' reach, so connected hands never separate.
 
-const PS_MENU_RANGE = 6;      // her menu opens only when he is within this distance of her (2026-11-04: 3 → 6 m)
+const PS_MENU_RANGE = 8;      // her menu opens only when he is within this distance of her (2026-11-04: 3 → 6 → 8 m)
 const PS = {
   helpGap: 0.92,             // Help: root distance, facing each other (the big heads need the room)
   holdGap: 0.8,              // Hold Hands: root distance, side by side (she is on his right)
@@ -4486,6 +4529,8 @@ class RoseCollector {
     scene.add(this.points);
   }
   get count() { return this.n; }
+  // (2026-11-04) a finished proposal starts a new collection cycle; respawns / pick-up animations are untouched
+  resetCount() { this.n = 0; }
   setViewportHeight(h) { this.points.material.uniforms.uScale.value = h; }
   // canvas tap (before the partner menu): true = consumed
   handleTap(raycaster) {
@@ -4652,8 +4697,8 @@ function createBouquet(roseParts) {
 
 // ---------------- the proposal (~10 s) ----------------
 class ProposalSequence {
-  constructor({ player, her, partner, camera, cine, renderer, scene, bounds, fills, roseParts, snow, onBusy }) {
-    Object.assign(this, { player, her, partner, camera, cine, renderer, scene, bounds, fills, snow, onBusy });
+  constructor({ player, her, partner, camera, cine, renderer, scene, bounds, fills, roseParts, snow, onBusy, onComplete }) {
+    Object.assign(this, { player, her, partner, camera, cine, renderer, scene, bounds, fills, snow, onBusy, onComplete });
     this.active = false;
     this.done = false;
     this.t = 0;
@@ -4963,6 +5008,7 @@ class ProposalSequence {
     this.active = false;
     this.done = true;
     this.relax = 0;                    // short blend from the final pose into the normal poses (in afterStep)
+    if (this.onComplete) this.onComplete();                         // (once per finished sequence: _finish runs once)
     this.onBusy(false);
   }
   // runs every fixed step after the normal updates: eases both rigs back for 0.8 s after the sequence, and keeps the
@@ -5491,11 +5537,13 @@ const proposal = new ProposalSequence({
   player, her: skater2, partner, camera, cine, renderer, scene, bounds: world.bounds,
   fills: [playerFill, skater2.softFill], roseParts: world.roses.parts, snow: world.snow,
   onBusy: (b) => { setActionBusy(b); if (!b) updateAskOut(); },      // (button looks available again after a replayable run)
+  // (2026-11-04) only a successfully finished proposal resets the rose count to 0/10 (a new cycle of 10)
+  onComplete: () => { roseCollector.resetCount(); STORY_UI.setCount(0, roseCollector.total); updateAskOut(); },
 });
 // TEMPORARY (testing): Ask Out is always available and can be replayed. Set to false to restore the
 // original rule (unlocks after all 10 roses, plays once). Rose collection / counter are unaffected.
 const ASK_OUT_TEST_UNLOCK = false;                                   // (2026-11-03: test bypass off — 10 roses unlock it again)
-proposal.allowReplay = ASK_OUT_TEST_UNLOCK;
+proposal.allowReplay = true;                                         // (2026-11-04: playable again after each new 10 roses)
 // "Ask Out" joins her menu (Help · Hold Hands · Dance · Ask Out); locked until all roses are collected
 const askBtn = document.createElement('button');
 askBtn.textContent = '고백하기';
@@ -5503,7 +5551,7 @@ askBtn.style.cssText = partner.radialItemStyle;                    // 4th item o
 askBtn.className = 'tap-pill radial-pill radial-item';
 function updateAskOut() {
   const open = ASK_OUT_TEST_UNLOCK ? !proposal.active
-    : roseCollector.count >= roseCollector.total && !proposal.done && !proposal.active;
+    : roseCollector.count >= roseCollector.total && !proposal.active;
   askBtn.setAttribute('aria-disabled', open ? 'false' : 'true');    // locked look: dimmed colours (CSS .radial-item)
 }
 askBtn.addEventListener('pointerdown', (e) => e.stopPropagation());
@@ -5511,7 +5559,6 @@ askBtn.addEventListener('click', (e) => {
   e.stopPropagation();
   askBtn.blur();
   if (proposal.active) return;
-  if (!ASK_OUT_TEST_UNLOCK && proposal.done) { STORY_UI.toast('이미 고백했어요.', 3); return; }
   if (!ASK_OUT_TEST_UNLOCK && roseCollector.count < roseCollector.total) { STORY_UI.toast('하얀 장미 10 송이를 모으면 고백할 수 있어요.', 3); return; }
   if (player.trick || player.spin || partner.mode === 'dance') return;
   partner.closeMenu();
