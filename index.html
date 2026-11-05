@@ -50,11 +50,78 @@
         font: 300 13px/1.5 "Helvetica Neue", Arial, sans-serif; letter-spacing: 0;
         text-transform: uppercase; pointer-events: none;
       }
+      /* (2026-11-05) loading screen while the rink loads and connects to the multiplayer server (net/rinkLink.js) */
+      #rink-loading { position: fixed; inset: 0; z-index: 40; display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 18px; padding: 24px; box-sizing: border-box; text-align: center; color: #f0f6fc;
+        background: radial-gradient(120% 85% at 50% 38%, #142553 0%, #0a1330 52%, #050a1a 100%);
+        font: 400 15px/1.5 "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+        letter-spacing: 0; transition: opacity .6s ease; touch-action: none; -webkit-user-select: none; user-select: none; }
+      #rink-loading.ld-out { opacity: 0; pointer-events: none; }
+      #rink-loading .ld-flake { width: 112px; height: 112px; overflow: visible; filter: drop-shadow(0 0 10px rgba(150, 190, 255, .35)); }
+      #rink-loading .ld-title { font-size: 16px; font-weight: 500; letter-spacing: .04em; opacity: .92; }
+      /* snowflake loop (4.4 s): dot → six arms grow (ease-in-out) → one turn → bursts into snow → dot again */
+      #rink-loading .ld-spin { animation: ld-spin 4.4s cubic-bezier(.45, 0, .55, 1) infinite; transform-origin: 0 0; }
+      #rink-loading .ld-arm { stroke-dasharray: 1; stroke-dashoffset: 1; animation: ld-draw 4.4s cubic-bezier(.45, 0, .55, 1) infinite; }
+      #rink-loading .ld-dot { animation: ld-dot 4.4s ease-in-out infinite; transform-origin: 0 0; }
+      #rink-loading .ld-bit { opacity: 0; animation: ld-burst 4.4s cubic-bezier(.2, .7, .3, 1) infinite; }
+      @keyframes ld-draw { 0%, 9% { stroke-dashoffset: 1; opacity: 1; } 42% { stroke-dashoffset: 0; } 74% { stroke-dashoffset: 0; opacity: 1; }
+        79%, 100% { stroke-dashoffset: 0; opacity: 0; } }
+      @keyframes ld-spin { 0%, 42% { transform: rotate(0) scale(1); } 72% { transform: rotate(360deg) scale(1); }
+        76% { transform: rotate(372deg) scale(1.12); } 100% { transform: rotate(372deg) scale(1.12); } }
+      @keyframes ld-dot { 0% { transform: scale(.6); opacity: .7; } 9% { transform: scale(1.15); opacity: 1; } 42%, 74% { transform: scale(1); opacity: 1; }
+        78% { transform: scale(0); opacity: 0; } 90% { transform: scale(0); opacity: 0; } 100% { transform: scale(.6); opacity: .7; } }
+      @keyframes ld-burst { 0%, 74% { opacity: 0; transform: translate(0, 0) scale(1); } 76% { opacity: 1; }
+        94% { opacity: 0; transform: translate(var(--bx), var(--by)) scale(.4); } 100% { opacity: 0; transform: translate(var(--bx), var(--by)) scale(.4); } }
+      /* a message (room full / no connection): the snowflake stays still, complete */
+      #rink-loading.ld-msg .ld-spin, #rink-loading.ld-msg .ld-dot, #rink-loading.ld-msg .ld-bit { animation: none; }
+      #rink-loading.ld-msg .ld-arm { animation: none; stroke-dashoffset: 0; }
+      #rink-loading .ld-panel { display: none; flex-direction: column; align-items: center; gap: 8px; max-width: 340px; }
+      #rink-loading.ld-msg .ld-panel { display: flex; }
+      #rink-loading.ld-msg .ld-title { display: none; }
+      #rink-loading .ld-head { font-size: 17px; font-weight: 600; line-height: 1.45; }
+      #rink-loading .ld-body { font-size: 14px; line-height: 1.6; opacity: .8; }
+      #rink-loading .ld-btns { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: 12px; }
+      #rink-loading .ld-btn { padding: 12px 20px; min-height: 44px; border-radius: 999px; border: 1px solid rgba(243, 217, 184, .45);
+        background: rgba(6, 12, 26, .55); font: inherit; font-size: 14px; letter-spacing: 0; cursor: pointer; touch-action: manipulation; }
+      #rink-loading .ld-btn.ld-primary { background: rgba(243, 217, 184, .16); border-color: rgba(243, 217, 184, .75); }
+      @media (prefers-reduced-motion: reduce) { #rink-loading .ld-spin, #rink-loading .ld-dot, #rink-loading .ld-bit { animation: none; }
+        #rink-loading .ld-arm { animation: none; stroke-dashoffset: 0; } }
     </style>
     <!-- Pretendard (HUD + action buttons) -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
   </head>
   <body>
+    <!-- (2026-11-05) loading screen: shown at once (before the large page has finished downloading); net/rinkLink.js hides it
+         when the rink is drawn and the multiplayer server has answered, or shows a message (room full / no connection) -->
+    <div id="rink-loading" role="status" aria-live="polite">
+      <svg class="ld-flake" viewBox="-60 -60 120 120" aria-hidden="true">
+        <defs><linearGradient id="ld-grad" x1="0" y1="-1" x2="0" y2="1" gradientUnits="objectBoundingBox">
+          <stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#b9d3ff"/></linearGradient></defs>
+        <g class="ld-spin" fill="none" stroke="url(#ld-grad)" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round">
+          <path class="ld-arm" pathLength="1" d="M0 0 V-40 M0 -19 L-10 -29 M0 -19 L10 -29 M0 -30 L-6.5 -36.5 M0 -30 L6.5 -36.5"/>
+          <path class="ld-arm" pathLength="1" transform="rotate(60)" d="M0 0 V-40 M0 -19 L-10 -29 M0 -19 L10 -29 M0 -30 L-6.5 -36.5 M0 -30 L6.5 -36.5"/>
+          <path class="ld-arm" pathLength="1" transform="rotate(120)" d="M0 0 V-40 M0 -19 L-10 -29 M0 -19 L10 -29 M0 -30 L-6.5 -36.5 M0 -30 L6.5 -36.5"/>
+          <path class="ld-arm" pathLength="1" transform="rotate(180)" d="M0 0 V-40 M0 -19 L-10 -29 M0 -19 L10 -29 M0 -30 L-6.5 -36.5 M0 -30 L6.5 -36.5"/>
+          <path class="ld-arm" pathLength="1" transform="rotate(240)" d="M0 0 V-40 M0 -19 L-10 -29 M0 -19 L10 -29 M0 -30 L-6.5 -36.5 M0 -30 L6.5 -36.5"/>
+          <path class="ld-arm" pathLength="1" transform="rotate(300)" d="M0 0 V-40 M0 -19 L-10 -29 M0 -19 L10 -29 M0 -30 L-6.5 -36.5 M0 -30 L6.5 -36.5"/>
+        </g>
+        <circle class="ld-dot" r="4.2" fill="#ffffff"/>
+        <g fill="#e6efff">
+          <circle class="ld-bit" r="2.2" style="--bx:0px;--by:-52px"/><circle class="ld-bit" r="1.6" style="--bx:26px;--by:-45px"/>
+          <circle class="ld-bit" r="2.2" style="--bx:45px;--by:-26px"/><circle class="ld-bit" r="1.6" style="--bx:52px;--by:0px"/>
+          <circle class="ld-bit" r="2.2" style="--bx:45px;--by:26px"/><circle class="ld-bit" r="1.6" style="--bx:26px;--by:45px"/>
+          <circle class="ld-bit" r="2.2" style="--bx:0px;--by:52px"/><circle class="ld-bit" r="1.6" style="--bx:-26px;--by:45px"/>
+          <circle class="ld-bit" r="2.2" style="--bx:-45px;--by:26px"/><circle class="ld-bit" r="1.6" style="--bx:-52px;--by:0px"/>
+          <circle class="ld-bit" r="2.2" style="--bx:-45px;--by:-26px"/><circle class="ld-bit" r="1.6" style="--bx:-26px;--by:-45px"/>
+        </g>
+      </svg>
+      <div class="ld-title">윈터우드 아이스링크 오픈중</div>
+      <div class="ld-panel">
+        <div class="ld-head" data-head></div>
+        <div class="ld-body" data-body></div>
+        <div class="ld-btns" data-btns></div>
+      </div>
+    </div>
     <div id="app"></div>
     <div class="title">Magical Winter Forest Ice Rink · WASD / 방향키로 이동</div>
     <!-- (2026-11-04) start-up diagnostics. A plain script, so it still works if the 3D module never loads: it records
@@ -5604,8 +5671,10 @@ function createTopHud({ toast } = {}) {
       ${S.connected
         ? `<div style="margin-top:6px;font-size:11.5px;opacity:.6">표시된 인원은 실제 접속자 수예요.</div>
            <div style="display:grid;grid-template-columns:repeat(auto-fill, minmax(140px, 1fr));gap:10px;margin-top:14px">${cards}</div>`
-        : `<div style="margin-top:14px;padding:18px 16px;border-radius:14px;border:1px dashed rgba(246,241,231,.22);font-size:13px;line-height:1.6;opacity:.8">
-             멀티플레이 서버가 아직 연결되지 않았어요.<br>서버가 준비되면 이곳에 방 목록과 실제 접속 인원이 표시돼요.</div>`}`;
+        : `<div style="margin-top:14px;padding:18px 16px;border-radius:14px;border:1px dashed rgba(246,241,231,.22);font-size:13px;line-height:1.6">
+             <span style="opacity:.8">지금은 나만의 링크장에서 혼자 타고 있어요.<br>링크장 서버에 연결하면 이곳에 실제 접속 인원이 표시돼요.</span>
+             <button data-reconnect style="${[...btnReset, 'display:block', 'margin-top:12px', 'padding:9px 16px', 'border-radius:999px',
+               'border:1px solid rgba(243,217,184,.6)', 'background:rgba(255,255,255,.06)', 'color:#f6f1e7', 'font-size:13px', 'font-weight:600'].join(';')}">링크장 서버에 연결하기</button></div>`}`;
   };
   const isOpen = () => pop.style.display !== 'none';
   const setOpen = (o) => {
@@ -5618,6 +5687,8 @@ function createTopHud({ toast } = {}) {
   pop.addEventListener('click', async (e) => {
     if (e.target.closest('[data-close]')) { setOpen(false); return; }
     if (e.target.closest('[data-refresh]') && ROOM_SERVICE.connected) { ROOM_SERVICE.refresh(); return; }
+    const rc = e.target.closest('[data-reconnect]');                 // (2026-11-05) offline → try the multiplayer server again
+    if (rc) { if (ROOM_SERVICE.reconnect) { rc.disabled = true; rc.textContent = '연결하는 중…'; await ROOM_SERVICE.reconnect(); render(); } return; }
     const card = e.target.closest('[data-room]');
     if (!card || card.disabled) return;
     const id = card.getAttribute('data-room');
@@ -5845,6 +5916,187 @@ class Celebration {
   }
 }
 
+// ===== net/rinkLink.js =====
+// (2026-11-05, Phase 2) connection to the Winterwood multiplayer server (Cloudflare Worker + Durable Object).
+// This phase only connects and enters the shared room — no other players, positions or animations are synced yet.
+//  - the loading screen (#rink-loading) stays until the rink has drawn its first frame AND the server has answered;
+//  - "room full" (4001), "daily limit" (4002) and ordinary connection errors / timeouts get different messages;
+//    from each, the player can retry or skate alone in their own rink (offline mode = the rink exactly as before);
+//  - while connected: a tiny "ping" every 25 s (answered by Cloudflare for free) detects a dead connection;
+//    a dropped connection is re-tried in the background (1 → 2 → 4 → 8 → 15 → 30 s), the rink keeps running;
+//  - the top-left HUD room pill (ROOM_SERVICE) shows the real connection state and player count.
+// Nothing secret here: the server address is public; the server itself checks the page origin.
+const RINK_LINK = (() => {
+  const URL_WS = 'wss://winterwood-rink.16hminryeong.workers.dev/ws';
+  const ROOM = { id: 'main', name: '윈터우드 링크장' };
+  const CONNECT_TIMEOUT = 10000, PING_EVERY = 25000, PONG_TIMEOUT = 10000;
+  const BACKOFF = [1000, 2000, 4000, 8000, 15000, 30000];
+  const MSG = {
+    full: { head: '현재 모든 링크장이 꽉 찼어요!⛸️', body: '기다리시는 동안 나만의 링크장에서 먼저 신나게 스케이트를 타실 수 있어요.' },
+    daily: { head: '오늘 링크장 입장이 모두 마감되었어요.', body: '매일 오전 9시에 다시 열려요. 그동안 나만의 링크장에서 스케이트를 타실 수 있어요.' },
+    error: { head: '링크장 서버에 연결하지 못했어요.', body: '인터넷 연결을 확인하고 다시 시도해 주세요. 나만의 링크장에서 먼저 스케이트를 타실 수도 있어요.' },
+  };
+  const L = {
+    mode: 'loading',          // 'loading' (loading screen) → 'online' | 'offline'
+    ws: null, id: null, players: 0, max: 4,
+    retry: 0, retryTimer: 0, connectTimer: 0, pingTimer: 0, pongTimer: 0,
+    resolved: false,          // the loading screen may close (online, or the player chose offline)
+    pending: null,            // resolve() of a manual reconnect from the HUD
+  };
+  const el = document.getElementById('rink-loading');
+  const toast = (t, s = 3) => { try { STORY_UI.toast(t, s); } catch (e) { /* (UI not ready) */ } };
+
+  // ---- loading screen ----
+  function panel(kind, buttons) {
+    if (!el) return;
+    const m = MSG[kind];
+    el.querySelector('[data-head]').textContent = m.head;
+    el.querySelector('[data-body]').textContent = m.body;
+    const box = el.querySelector('[data-btns]');
+    box.replaceChildren(...buttons.map(([label, fn, primary]) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'ld-btn' + (primary ? ' ld-primary' : ''); b.textContent = label;
+      b.addEventListener('click', (e) => { e.stopPropagation(); fn(); });
+      return b;
+    }));
+    el.classList.add('ld-msg');
+  }
+  function loadingAgain() { if (el) el.classList.remove('ld-msg'); }
+  // close the loading screen once the rink has drawn its first frame (it keeps rendering underneath meanwhile)
+  function closeWhenReady() {
+    if (!el || el.dataset.closing) return;
+    if (!(window.__rinkDiag && window.__rinkDiag.started)) { requestAnimationFrame(closeWhenReady); return; }
+    el.dataset.closing = '1';
+    el.classList.add('ld-out');
+    setTimeout(() => { el.style.display = 'none'; }, 650);   // display:none also stops its CSS animations
+  }
+
+  // ---- HUD (top-left room pill) ----
+  function hud() {
+    const S = ROOM_SERVICE;
+    S.connected = L.mode === 'online';
+    S.currentRoomId = S.connected ? ROOM.id : null;
+    S.rooms = S.connected ? [{ id: ROOM.id, name: ROOM.name, players: L.players, capacity: L.max }] : [];
+    S.notify();
+  }
+
+  // ---- connection ----
+  function clearTimers() {
+    clearTimeout(L.connectTimer); clearTimeout(L.retryTimer); clearInterval(L.pingTimer); clearTimeout(L.pongTimer);
+  }
+  function connect() {
+    clearTimers();
+    if (L.ws) { try { L.ws.onclose = L.ws.onmessage = L.ws.onerror = null; L.ws.close(); } catch (e) { /* ignore */ } }
+    let ws, welcomed = false, refused = null, done = false;
+    try { ws = new WebSocket(URL_WS); } catch (e) { setTimeout(() => failed('error'), 0); return; }
+    L.ws = ws;
+    L.connectTimer = setTimeout(() => { if (!welcomed) { finish(); try { ws.close(); } catch (e) { /* ignore */ } failed('error'); } }, CONNECT_TIMEOUT);
+    const finish = () => { done = true; ws.onclose = ws.onmessage = ws.onerror = null; clearTimers(); if (L.ws === ws) L.ws = null; };
+    ws.onmessage = (ev) => {
+      if (ev.data === 'pong') { clearTimeout(L.pongTimer); return; }
+      let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (m.t === 'welcome') {
+        welcomed = true; clearTimeout(L.connectTimer);
+        L.id = m.id; L.players = m.players || 1; L.max = m.max || L.max;
+        online();
+      } else if (m.t === 'refused') refused = m.reason;
+      else if (m.t === 'hello-ok') { L.players = m.players; hud(); }
+      else if (m.t === 'notice' && m.reason === 'daily-limit-soon') { /* players already inside keep playing */ }
+    };
+    ws.onclose = (ev) => {
+      if (done) return;
+      finish();
+      const reason = refused === 'room-full' || ev.code === 4001 ? 'full' : refused === 'daily-limit' || ev.code === 4002 ? 'daily' : 'error';
+      if (welcomed) dropped(reason); else failed(reason);
+    };
+    ws.onerror = () => { /* a close event follows */ };
+  }
+  function online() {
+    const wasReconnect = L.mode === 'online' && L.retry > 0, fromSolo = L.mode === 'offline-retry';
+    L.mode = 'online'; L.retry = 0; L.resolved = true;
+    hud();
+    if (wasReconnect || fromSolo) toast('링크장 서버에 ' + (fromSolo ? '' : '다시 ') + '연결되었어요.', 3);
+    if (L.pending) { L.pending(true); L.pending = null; }
+    closeWhenReady();
+    // keep-alive: "ping" → "pong" is answered by Cloudflare itself (free); no answer in 10 s = the connection is dead
+    L.pingTimer = setInterval(() => {
+      if (!L.ws || L.ws.readyState !== 1) return;
+      try { L.ws.send('ping'); } catch (e) { /* closing */ }
+      clearTimeout(L.pongTimer);
+      L.pongTimer = setTimeout(() => { const ws = L.ws; if (ws) { ws.onclose && ws.onclose({ code: 4900 }); try { ws.close(); } catch (e) { /* ignore */ } } }, PONG_TIMEOUT);
+    }, PING_EVERY);
+  }
+  // could not get in (first try, a retry, or a manual reconnect from the HUD)
+  function failed(reason) {
+    if (L.mode === 'loading') {                      // still on the loading screen: explain and offer the choices
+      const solo = ['나만의 링크장 입장', () => offline(), reason !== 'error'];
+      const again = ['다시 시도', () => { loadingAgain(); connect(); }, reason === 'error'];
+      panel(reason, reason === 'daily' ? [solo] : reason === 'full' ? [solo, again] : [again, solo]);
+      return;
+    }
+    if (L.mode === 'online' && reason === 'error' && L.retry < BACKOFF.length) { retryLater(); return; }   // background reconnect
+    const wasOnline = L.mode === 'online';
+    offline();
+    if (L.pending) { L.pending(false); L.pending = null; }
+    toast(reason === 'full' ? '현재 모든 링크장이 꽉 찼어요!⛸️ 나만의 링크장에서 계속 타실 수 있어요.'
+      : reason === 'daily' ? '오늘 링크장 입장이 모두 마감되었어요. 오전 9시에 다시 열려요.'
+      : wasOnline ? '링크장 서버에 다시 연결하지 못했어요. 왼쪽 위 메뉴에서 다시 연결할 수 있어요.'
+      : '링크장 서버에 연결하지 못했어요. 잠시 후 다시 시도해 주세요.', 4);
+  }
+  // was connected, then lost it
+  function dropped(reason) {
+    L.players = 0;
+    if (reason !== 'error') { failed(reason); return; }   // removed by the server (daily limit) → own rink
+    if (L.retry === 0) toast('링크장 서버와 연결이 끊겼어요. 다시 연결하는 중이에요…', 3);
+    retryLater();
+  }
+  function retryLater() {
+    const wait = BACKOFF[Math.min(L.retry, BACKOFF.length - 1)];
+    L.retry++;
+    L.mode = 'online';                               // (the rink keeps running; the HUD shows the reconnect state)
+    ROOM_SERVICE.connected = false; ROOM_SERVICE.currentRoomId = null; ROOM_SERVICE.rooms = []; ROOM_SERVICE.notify();
+    clearTimeout(L.retryTimer);
+    L.retryTimer = setTimeout(connect, wait);
+  }
+  function offline() {
+    clearTimers();
+    if (L.ws) { try { L.ws.onclose = L.ws.onmessage = L.ws.onerror = null; L.ws.close(1000, 'offline'); } catch (e) { /* ignore */ } L.ws = null; }
+    L.mode = 'offline'; L.retry = 0; L.players = 0; L.resolved = true;
+    hud();
+    closeWhenReady();
+  }
+  // back in the foreground (phones suspend background tabs): reconnect at once if the connection was lost
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden || L.mode !== 'online') return;
+    if (!L.ws || L.ws.readyState > 1) { clearTimeout(L.retryTimer); connect(); }
+  });
+
+  // ---- ROOM_SERVICE (HUD) hooks ----
+  // "인원 새로고침" (and opening the room popup): ask the server for the count — at most once every 2 s, so repeated
+  // taps can never come near the server's 15 messages/s limit (extra taps just keep showing the last count)
+  let lastHello = -Infinity;
+  ROOM_SERVICE.refresh = async function () {
+    const now = performance.now();
+    if (L.ws && L.ws.readyState === 1 && now - lastHello >= 2000) {
+      lastHello = now;
+      try { L.ws.send(JSON.stringify({ t: 'hello' })); } catch (e) { /* ignore */ }
+    }
+    this.notify();
+  };
+  ROOM_SERVICE.join = function () {                                  // (one room for now) offline → try to enter again
+    if (L.mode === 'online' && L.ws && L.ws.readyState === 1) return Promise.resolve(true);
+    return new Promise((res) => { L.pending = res; L.mode = 'offline-retry'; connect(); });
+  };
+  ROOM_SERVICE.reconnect = ROOM_SERVICE.join;
+
+  return {
+    start() { connect(); },
+    get mode() { return L.mode; },
+    get id() { return L.id; },
+    get players() { return L.players; },
+  };
+})();
+
 // ===== main.js =====
 
 
@@ -5948,6 +6200,7 @@ controls.onTap = (ray) => partner.handleTap(ray);
 // ---- white rose collection + Ask Out proposal (2026-11-03) ---------------------------------------------
 const topHud = createTopHud({ toast: (text, sec) => STORY_UI.toast(text, sec) });   // top-left rooms, top-right volume
 STORY_UI.mount(topHud.right);                                                        // rose counter: top-right, after the volume
+RINK_LINK.start();                                   // (2026-11-05) multiplayer server: connect / enter the room (loading screen)
 const pillStyle = partner.pillStyle;
 const roseCollector = new RoseCollector({
   roses: world.roses, scene, camera, dom: renderer.domElement, pillStyle,
