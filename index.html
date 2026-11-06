@@ -35,6 +35,14 @@
       .action-btn { position: relative; }
       .action-btn + .action-btn::before { content: ''; position: absolute; left: 0; top: 26%; bottom: 26%; width: 1px;
         background: rgba(243,217,184,.2); pointer-events: none; }
+      /* (2026-11-06) even spacing: the sides next to a divider are tighter than the capsule's outer ends (the rounded
+         ends need a little more room to look equal); outer padding, height and font are unchanged */
+      .action-btn:not(:first-child) { padding-left: clamp(12px, 2.9vw, 18px) !important; }
+      .action-btn:not(:last-child) { padding-right: clamp(12px, 2.9vw, 18px) !important; }
+      @media (max-width: 480px) {
+        .action-btn:not(:first-child) { padding-left: clamp(10px, 2.8vw, 14px) !important; }
+        .action-btn:not(:last-child) { padding-right: clamp(10px, 2.8vw, 14px) !important; }
+      }
       /* hover feedback (mouse / trackpad only — never on touch screens); no size change, disabled stays disabled */
       button { transition-duration: .2s; }
       button:not(.radial-item) { transition-property: opacity, filter, background-color, transform, color, border-color !important; }
@@ -53,28 +61,41 @@
       /* (2026-11-05) loading screen while the rink loads and connects to the multiplayer server (net/rinkLink.js) */
       #rink-loading { position: fixed; inset: 0; z-index: 40; display: flex; flex-direction: column; align-items: center; justify-content: center;
         gap: 18px; padding: 24px; box-sizing: border-box; text-align: center; color: #f0f6fc;
-        background: radial-gradient(120% 85% at 50% 38%, #142553 0%, #0a1330 52%, #050a1a 100%);
+        background: linear-gradient(180deg, #000000 0%, #010207 34%, #030818 70%, #050c24 100%);   /* (2026-11-06) black → deep navy */
         font: 400 15px/1.5 "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
         letter-spacing: 0; transition: opacity .6s ease; touch-action: none; -webkit-user-select: none; user-select: none; }
       #rink-loading.ld-out { opacity: 0; pointer-events: none; }
       #rink-loading .ld-flake { width: 112px; height: 112px; overflow: visible; filter: drop-shadow(0 0 10px rgba(150, 190, 255, .35)); }
-      #rink-loading .ld-title { font-size: 16px; font-weight: 500; letter-spacing: .04em; opacity: .92; }
-      /* snowflake loop (4.4 s): dot → six arms grow (ease-in-out) → one turn → bursts into snow → dot again */
-      #rink-loading .ld-spin { animation: ld-spin 4.4s cubic-bezier(.45, 0, .55, 1) infinite; transform-origin: 0 0; }
-      #rink-loading .ld-arm { stroke-dasharray: 1; stroke-dashoffset: 1; animation: ld-draw 4.4s cubic-bezier(.45, 0, .55, 1) infinite; }
-      #rink-loading .ld-dot { animation: ld-dot 4.4s ease-in-out infinite; transform-origin: 0 0; }
-      #rink-loading .ld-bit { opacity: 0; animation: ld-burst 4.4s cubic-bezier(.2, .7, .3, 1) infinite; }
-      @keyframes ld-draw { 0%, 9% { stroke-dashoffset: 1; opacity: 1; } 42% { stroke-dashoffset: 0; } 74% { stroke-dashoffset: 0; opacity: 1; }
-        79%, 100% { stroke-dashoffset: 0; opacity: 0; } }
-      @keyframes ld-spin { 0%, 42% { transform: rotate(0) scale(1); } 72% { transform: rotate(360deg) scale(1); }
-        76% { transform: rotate(372deg) scale(1.12); } 100% { transform: rotate(372deg) scale(1.12); } }
-      @keyframes ld-dot { 0% { transform: scale(.6); opacity: .7; } 9% { transform: scale(1.15); opacity: 1; } 42%, 74% { transform: scale(1); opacity: 1; }
-        78% { transform: scale(0); opacity: 0; } 90% { transform: scale(0); opacity: 0; } 100% { transform: scale(.6); opacity: .7; } }
-      @keyframes ld-burst { 0%, 74% { opacity: 0; transform: translate(0, 0) scale(1); } 76% { opacity: 1; }
-        94% { opacity: 0; transform: translate(var(--bx), var(--by)) scale(.4); } 100% { opacity: 0; transform: translate(var(--bx), var(--by)) scale(.4); } }
+      /* (2026-11-06) three lines: 마법의 아이스링크장 / 오픈중 / progress (%), Pretendard, letter-spacing 0 */
+      #rink-loading .ld-title { display: flex; flex-direction: column; align-items: center; gap: 2px; letter-spacing: 0; }
+      #rink-loading .ld-l1 { font-size: 17px; font-weight: 600; line-height: 1.45; opacity: .95; }
+      #rink-loading .ld-l2 { font-size: 15px; font-weight: 400; line-height: 1.45; opacity: .8; }
+      #rink-loading .ld-l3 { margin-top: 8px; font-size: 13px; font-weight: 500; line-height: 1.3; opacity: .58; font-variant-numeric: tabular-nums; }
+      /* snowflake loop (5.2 s), one step at a time (ease-in-out): dot → six long stems grow out from the centre →
+         the inner short branches → the outer short branches → one turn → bursts into snow → back to the dot */
+      #rink-loading .ld-spin { animation: ld-spin 5.2s cubic-bezier(.45, 0, .55, 1) infinite; transform-origin: 0 0; }
+      #rink-loading .ld-stem, #rink-loading .ld-b1, #rink-loading .ld-b2 { stroke-dasharray: 1; stroke-dashoffset: 1; opacity: 0;
+        animation: 5.2s cubic-bezier(.45, 0, .55, 1) infinite; }
+      #rink-loading .ld-stem { animation-name: ld-stem; }
+      #rink-loading .ld-b1 { animation-name: ld-b1; }
+      #rink-loading .ld-b2 { animation-name: ld-b2; }
+      #rink-loading .ld-dot { animation: ld-dot 5.2s ease-in-out infinite; transform-origin: 0 0; }
+      #rink-loading .ld-bit { opacity: 0; animation: ld-burst 5.2s cubic-bezier(.2, .7, .3, 1) infinite; }
+      @keyframes ld-stem { 0%, 8% { stroke-dashoffset: 1; opacity: 0; } 8.5% { stroke-dashoffset: 1; opacity: 1; } 30% { stroke-dashoffset: 0; opacity: 1; }
+        76% { stroke-dashoffset: 0; opacity: 1; } 80%, 100% { stroke-dashoffset: 0; opacity: 0; } }
+      @keyframes ld-b1 { 0%, 31% { stroke-dashoffset: 1; opacity: 0; } 31.5% { stroke-dashoffset: 1; opacity: 1; } 40% { stroke-dashoffset: 0; opacity: 1; }
+        76% { stroke-dashoffset: 0; opacity: 1; } 80%, 100% { stroke-dashoffset: 0; opacity: 0; } }
+      @keyframes ld-b2 { 0%, 41% { stroke-dashoffset: 1; opacity: 0; } 41.5% { stroke-dashoffset: 1; opacity: 1; } 49% { stroke-dashoffset: 0; opacity: 1; }
+        76% { stroke-dashoffset: 0; opacity: 1; } 80%, 100% { stroke-dashoffset: 0; opacity: 0; } }
+      @keyframes ld-spin { 0%, 52% { transform: rotate(0) scale(1); } 74% { transform: rotate(360deg) scale(1); }
+        78% { transform: rotate(372deg) scale(1.12); } 100% { transform: rotate(372deg) scale(1.12); } }
+      @keyframes ld-dot { 0% { transform: scale(.6); opacity: .7; } 8% { transform: scale(1.15); opacity: 1; } 14%, 76% { transform: scale(1); opacity: 1; }
+        80% { transform: scale(0); opacity: 0; } 92% { transform: scale(0); opacity: 0; } 100% { transform: scale(.6); opacity: .7; } }
+      @keyframes ld-burst { 0%, 76% { opacity: 0; transform: translate(0, 0) scale(1); } 78% { opacity: 1; }
+        95% { opacity: 0; transform: translate(var(--bx), var(--by)) scale(.4); } 100% { opacity: 0; transform: translate(var(--bx), var(--by)) scale(.4); } }
       /* a message (room full / no connection): the snowflake stays still, complete */
       #rink-loading.ld-msg .ld-spin, #rink-loading.ld-msg .ld-dot, #rink-loading.ld-msg .ld-bit { animation: none; }
-      #rink-loading.ld-msg .ld-arm { animation: none; stroke-dashoffset: 0; }
+      #rink-loading.ld-msg .ld-stem, #rink-loading.ld-msg .ld-b1, #rink-loading.ld-msg .ld-b2 { animation: none; stroke-dashoffset: 0; opacity: 1; }
       #rink-loading .ld-panel { display: none; flex-direction: column; align-items: center; gap: 8px; max-width: 340px; }
       #rink-loading.ld-msg .ld-panel { display: flex; }
       #rink-loading.ld-msg .ld-title { display: none; }
@@ -85,7 +106,7 @@
         background: rgba(6, 12, 26, .55); font: inherit; font-size: 14px; letter-spacing: 0; cursor: pointer; touch-action: manipulation; }
       #rink-loading .ld-btn.ld-primary { background: rgba(243, 217, 184, .16); border-color: rgba(243, 217, 184, .75); }
       @media (prefers-reduced-motion: reduce) { #rink-loading .ld-spin, #rink-loading .ld-dot, #rink-loading .ld-bit { animation: none; }
-        #rink-loading .ld-arm { animation: none; stroke-dashoffset: 0; } }
+        #rink-loading .ld-stem, #rink-loading .ld-b1, #rink-loading .ld-b2 { animation: none; stroke-dashoffset: 0; opacity: 1; } }
     </style>
     <!-- Pretendard (HUD + action buttons) -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
@@ -95,15 +116,28 @@
          when the rink is drawn and the multiplayer server has answered, or shows a message (room full / no connection) -->
     <div id="rink-loading" role="status" aria-live="polite">
       <svg class="ld-flake" viewBox="-60 -60 120 120" aria-hidden="true">
-        <defs><linearGradient id="ld-grad" x1="0" y1="-1" x2="0" y2="1" gradientUnits="objectBoundingBox">
+        <defs><linearGradient id="ld-grad" x1="0" y1="-44" x2="0" y2="16" gradientUnits="userSpaceOnUse">
           <stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#b9d3ff"/></linearGradient></defs>
         <g class="ld-spin" fill="none" stroke="url(#ld-grad)" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round">
-          <path class="ld-arm" pathLength="1" d="M0 0 V-40 M0 -19 L-10 -29 M0 -19 L10 -29 M0 -30 L-6.5 -36.5 M0 -30 L6.5 -36.5"/>
-          <path class="ld-arm" pathLength="1" transform="rotate(60)" d="M0 0 V-40 M0 -19 L-10 -29 M0 -19 L10 -29 M0 -30 L-6.5 -36.5 M0 -30 L6.5 -36.5"/>
-          <path class="ld-arm" pathLength="1" transform="rotate(120)" d="M0 0 V-40 M0 -19 L-10 -29 M0 -19 L10 -29 M0 -30 L-6.5 -36.5 M0 -30 L6.5 -36.5"/>
-          <path class="ld-arm" pathLength="1" transform="rotate(180)" d="M0 0 V-40 M0 -19 L-10 -29 M0 -19 L10 -29 M0 -30 L-6.5 -36.5 M0 -30 L6.5 -36.5"/>
-          <path class="ld-arm" pathLength="1" transform="rotate(240)" d="M0 0 V-40 M0 -19 L-10 -29 M0 -19 L10 -29 M0 -30 L-6.5 -36.5 M0 -30 L6.5 -36.5"/>
-          <path class="ld-arm" pathLength="1" transform="rotate(300)" d="M0 0 V-40 M0 -19 L-10 -29 M0 -19 L10 -29 M0 -30 L-6.5 -36.5 M0 -30 L6.5 -36.5"/>
+          <!-- (2026-11-06) each arm grows in steps: long stem first, then the inner short branches, then the outer ones -->
+          <g><path class="ld-stem" pathLength="1" d="M0 0 V-40"/>
+            <path class="ld-b1" pathLength="1" d="M0 -19 L-10 -29"/><path class="ld-b1" pathLength="1" d="M0 -19 L10 -29"/>
+            <path class="ld-b2" pathLength="1" d="M0 -30 L-6.5 -36.5"/><path class="ld-b2" pathLength="1" d="M0 -30 L6.5 -36.5"/></g>
+          <g transform="rotate(60)"><path class="ld-stem" pathLength="1" d="M0 0 V-40"/>
+            <path class="ld-b1" pathLength="1" d="M0 -19 L-10 -29"/><path class="ld-b1" pathLength="1" d="M0 -19 L10 -29"/>
+            <path class="ld-b2" pathLength="1" d="M0 -30 L-6.5 -36.5"/><path class="ld-b2" pathLength="1" d="M0 -30 L6.5 -36.5"/></g>
+          <g transform="rotate(120)"><path class="ld-stem" pathLength="1" d="M0 0 V-40"/>
+            <path class="ld-b1" pathLength="1" d="M0 -19 L-10 -29"/><path class="ld-b1" pathLength="1" d="M0 -19 L10 -29"/>
+            <path class="ld-b2" pathLength="1" d="M0 -30 L-6.5 -36.5"/><path class="ld-b2" pathLength="1" d="M0 -30 L6.5 -36.5"/></g>
+          <g transform="rotate(180)"><path class="ld-stem" pathLength="1" d="M0 0 V-40"/>
+            <path class="ld-b1" pathLength="1" d="M0 -19 L-10 -29"/><path class="ld-b1" pathLength="1" d="M0 -19 L10 -29"/>
+            <path class="ld-b2" pathLength="1" d="M0 -30 L-6.5 -36.5"/><path class="ld-b2" pathLength="1" d="M0 -30 L6.5 -36.5"/></g>
+          <g transform="rotate(240)"><path class="ld-stem" pathLength="1" d="M0 0 V-40"/>
+            <path class="ld-b1" pathLength="1" d="M0 -19 L-10 -29"/><path class="ld-b1" pathLength="1" d="M0 -19 L10 -29"/>
+            <path class="ld-b2" pathLength="1" d="M0 -30 L-6.5 -36.5"/><path class="ld-b2" pathLength="1" d="M0 -30 L6.5 -36.5"/></g>
+          <g transform="rotate(300)"><path class="ld-stem" pathLength="1" d="M0 0 V-40"/>
+            <path class="ld-b1" pathLength="1" d="M0 -19 L-10 -29"/><path class="ld-b1" pathLength="1" d="M0 -19 L10 -29"/>
+            <path class="ld-b2" pathLength="1" d="M0 -30 L-6.5 -36.5"/><path class="ld-b2" pathLength="1" d="M0 -30 L6.5 -36.5"/></g>
         </g>
         <circle class="ld-dot" r="4.2" fill="#ffffff"/>
         <g fill="#e6efff">
@@ -115,13 +149,33 @@
           <circle class="ld-bit" r="2.2" style="--bx:-45px;--by:-26px"/><circle class="ld-bit" r="1.6" style="--bx:-26px;--by:-45px"/>
         </g>
       </svg>
-      <div class="ld-title">윈터우드 아이스링크 오픈중</div>
+      <div class="ld-title"><div class="ld-l1">마법의 아이스링크장</div><div class="ld-l2">오픈중</div><div class="ld-l3" data-progress>0%</div></div>
       <div class="ld-panel">
         <div class="ld-head" data-head></div>
         <div class="ld-body" data-body></div>
         <div class="ld-btns" data-btns></div>
       </div>
     </div>
+    <script>
+      // (2026-11-06) loading progress = the share of the real start-up steps already finished (never a timer):
+      // 1 page + 3D engine downloaded, 2 rink built (both marked when the main script has run), 3 first frame drawn,
+      // 4 ready to enter (server answered or own rink chosen, loading screen closing). The page download itself cannot
+      // be measured from inside the page, so it shows 0% until the main script has run.
+      (() => {
+        const el = document.querySelector('#rink-loading [data-progress]');
+        if (!el) return;
+        const TOTAL = 4;
+        let done = 0;
+        window.__rinkLoad = (n) => { if (n > done) { done = n; el.textContent = Math.round((done / TOTAL) * 100) + '%'; } };
+        const poll = () => {
+          const ov = document.getElementById('rink-loading');
+          if (window.__rinkDiag && window.__rinkDiag.started) window.__rinkLoad(3);
+          if (ov && ov.classList.contains('ld-out')) { window.__rinkLoad(4); return; }
+          requestAnimationFrame(poll);
+        };
+        requestAnimationFrame(poll);
+      })();
+    </script>
     <div id="app"></div>
     <div class="title">Magical Winter Forest Ice Rink · WASD / 방향키로 이동</div>
     <!-- (2026-11-04) start-up diagnostics. A plain script, so it still works if the 3D module never loads: it records
@@ -2204,8 +2258,9 @@ function createLights({ moonDir }) {
 // (slightly above and to the right) to the skater's own materials, as indirect diffuse (no shine).
 // It travels with the camera, so the face, hair and hoodie keep the same gentle brightness anywhere,
 // while the real scene lights (tree, forest, moon) still add their warm/cool colour on top.
-function addSoftFill(root, { color, intensity, boost = 1 }) {
-  const uFill = { value: new THREE.Color(color).multiplyScalar(intensity) };
+function addSoftFill(root, { color, intensity, boost = 1 }, shared = null) {
+  // (shared: an earlier returned fill — Phase 3 model swap: the new model joins the same light, e.g. the proposal's)
+  const uFill = shared || { value: new THREE.Color(color).multiplyScalar(intensity) };
   const uBoost = { value: boost };   // brightens every light falling on the skater (not the scene)
   const done = new Set();
   root.traverse((o) => {
@@ -2869,6 +2924,13 @@ function buildSkater({ style = 'skater' } = {}) {
         [-0.05, 0.094], [-0.2, 0.088], [-0.36, 0.079], [-0.45, 0.075], [-0.52, 0.073], [-0.54, 0.064],
       ], legW, C.skin);
       knee.add(new THREE.Mesh(new THREE.SphereGeometry(0.076, 24, 18), C.skin));
+      // (2026-11-06) black shorts under the skirt: a thin skinned sleeve over the top of each thigh (same black as the
+      // skirt / waist, same bend weights as the leg) ending a little above the skirt hem — when a thigh lifts in a spin,
+      // black shorts show instead of bare thigh. The skirt, legs and rig are unchanged.
+      skinLimb(hip, [hip, knee, ankle], [
+        ...dome(0.101),
+        [-0.05, 0.101], [-0.11, 0.1], [-0.15, 0.098], [-0.164, 0.096], [-0.172, 0.092], [-0.175, 0.086],
+      ], legW, C.pants);
     }
     // skate: high-top round boot — shaft visible under the trouser hem, round toe cap — on a silver
     // blade holder with two windows and a curved runner + toe pick (runner bottom = same ice contact height)
@@ -2926,6 +2988,7 @@ function buildSkater({ style = 'skater' } = {}) {
     legL: leg(1), legR: leg(-1),
     L,
   };
+  rig.knit = C.knit;              // (2026-11-05, Phase 3) the upper clothing only (knit body, collar, sleeves, elbows) — for the colour choice
 
   // bind every tube in the rest pose: geometry is moved from its joint frame into
   // the mesh's space, then the skeleton records the rest transforms
@@ -2969,6 +3032,25 @@ class PlaceholderPlayer {
 
   get position() {
     return this.mesh.position;
+  }
+
+  // (2026-11-05, Phase 3) male ('skater') / female ('girl') player model. Both are built by buildSkater with the SAME
+  // shared rig, so movement, skating, jumps, spins, the routine, partner moves and effects all keep working. Each model is
+  // built once and kept; switching only swaps it in the scene (same spot, same facing, same top colour).
+  setStyle(style, prepare) {
+    style = style === 'girl' ? 'girl' : 'skater';
+    if ((this.style || 'skater') === style) return this.rig;
+    if (this.trick || this.spin || this.routine) return this.rig;     // never in the middle of a move
+    this._rigs = this._rigs || { skater: this.rig };
+    let rig = this._rigs[style];
+    if (!rig) { rig = this._rigs[style] = buildSkater({ style }); if (prepare) prepare(rig); }
+    const old = this.mesh, parent = old.parent;
+    rig.root.position.copy(old.position);
+    rig.root.rotation.copy(old.rotation);
+    rig.knit.color.copy(this.rig.knit.color);
+    if (parent) { parent.add(rig.root); parent.remove(old); }
+    this.rig = rig; this.mesh = rig.root; this.style = style;
+    return rig;
   }
 
   update(dt) {
@@ -5916,6 +5998,224 @@ class Celebration {
   }
 }
 
+// ===== ui/playerSetup.js =====
+// (2026-11-05, Phase 3) before entering the rink: male / female model, nickname (≤ 8 characters, blank → a random
+// winter word pair) and the colour of the upper clothing (8 swatches, ivory first). The setup sits over the live rink
+// (the camera swings round to his / her front) right after the loading screen, and every choice shows on the real
+// character at once. Nothing is sent to the server yet (nicknames for other players come in a later phase).
+const NICK_ADJ = ['차가운', '빛나는', '투명한', '영롱한', '반짝이는', '고요한', '쓸쓸한', '하얀', '포근한', '은은한'];
+const NICK_NOUN = ['별', '얼음', '달', '눈송이', '물', '호수', '바람', '서리', '숲', '오로라'];
+const NICK_MAX = 8;
+const nickLength = (s) => Array.from(s).length;                       // characters as people count them (한글 1자 = 1)
+const cleanNick = (s) => String(s || '').replace(/[\u0000-\u001f\u007f]/g, '').replace(/\s+/g, ' ').trim();
+function randomNick() {
+  for (;;) {                                                           // every pair fits (longest: "반짝이는 오로라" = 8), checked anyway
+    const n = NICK_ADJ[Math.floor(Math.random() * NICK_ADJ.length)] + ' ' + NICK_NOUN[Math.floor(Math.random() * NICK_NOUN.length)];
+    if (nickLength(n) <= NICK_MAX) return n;
+  }
+}
+// upper-clothing colours (material colours; the rink's warm light shows them a little warmer on screen)
+const TOP_COLORS = [
+  { name: '아이보리', hex: 0xf1e8d6 },                                // = the original knit colour (default)
+  { name: '블러시 핑크', hex: 0xf3cfd4 },
+  { name: '피치', hex: 0xf5d6bf },
+  { name: '버터 옐로', hex: 0xf2e6b3 },
+  { name: '민트', hex: 0xcbe8da },
+  { name: '아이스 블루', hex: 0xc7dcf2 },
+  { name: '페리윙클', hex: 0xcfd0f2 },
+  { name: '라일락', hex: 0xe8d2ec },
+];
+const PROFILE_KEY = 'rink.profile';
+
+// nickname floating above the player's head: a small screen-space label (always upright and readable, never in the way)
+function createNameTag(player, camera) {
+  const el = document.createElement('div');
+  el.style.cssText = ['position:fixed', 'left:0', 'top:0', 'z-index:8', 'pointer-events:none', 'display:none', 'white-space:nowrap',
+    'padding:3px 10px', 'border-radius:999px', 'background:rgba(6,12,26,.42)', 'color:#f0f6fc', `font:600 12.5px/1.35 ${HUD_FONT}`,
+    'letter-spacing:0', 'text-shadow:0 1px 3px rgba(0,0,0,.55)', 'will-change:transform'].join(';');
+  document.body.appendChild(el);
+  const v = new THREE.Vector3();
+  let text = '';
+  return {
+    set(t) { text = t || ''; el.textContent = text; },
+    update() {
+      if (!text) { el.style.display = 'none'; return; }
+      const R = player.rig;
+      R.pelvis.getWorldPosition(v);                                    // above the body (not the swaying head)
+      v.y = player.mesh.position.y + 1.5 + R.neck.position.y + 0.04;   // just over the head top (male / female heights)
+      v.project(camera);
+      if (v.z > 1 || v.z < -1) { el.style.display = 'none'; return; }
+      el.style.display = 'block';
+      el.style.transform = `translate(${((v.x + 1) / 2 * innerWidth).toFixed(1)}px, ${((1 - v.y) / 2 * innerHeight).toFixed(1)}px) translate(-50%, -100%)`;
+    },
+  };
+}
+
+function createPlayerSetup({ player, cine, camera, nameTag, prepareRig }) {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem(PROFILE_KEY) || '{}') || {}; } catch (e) { saved = {}; }
+  const state = {
+    style: saved.style === 'girl' ? 'girl' : 'skater',
+    color: TOP_COLORS.some((c) => c.hex === saved.color) ? saved.color : TOP_COLORS[0].hex,
+    suggestion: randomNick(),
+  };
+  const css = document.createElement('style');
+  css.textContent = `
+    #rink-setup { position: fixed; inset: 0; z-index: 35; display: flex; align-items: flex-end; justify-content: center;
+      padding: 0 12px calc(16px + env(safe-area-inset-bottom)); box-sizing: border-box; touch-action: none;
+      background: linear-gradient(to top, rgba(5,10,24,.55), rgba(5,10,24,0) 55%); font-family: ${HUD_FONT}; color: #f0f6fc;
+      transition: opacity .45s ease; }
+    #rink-setup.st-out { opacity: 0; pointer-events: none; }
+    #rink-setup .st-panel { width: min(400px, 100%); display: flex; flex-direction: column; gap: 14px; padding: 18px 18px 16px;
+      box-sizing: border-box; border-radius: 22px; background: rgba(8,14,30,.6); border: 1px solid rgba(246,241,231,.14);
+      backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
+    #rink-setup .st-label { font-size: 12px; font-weight: 600; opacity: .62; margin-bottom: 7px; letter-spacing: 0; }
+    #rink-setup .st-seg { display: flex; gap: 8px; }
+    #rink-setup .st-seg button { flex: 1; height: 42px; border-radius: 999px; border: 1px solid rgba(243,217,184,.3);
+      background: rgba(255,255,255,.04); font: 600 14px/1 ${HUD_FONT}; letter-spacing: 0; cursor: pointer; touch-action: manipulation; }
+    #rink-setup .st-seg button[aria-pressed=true] { background: rgba(243,217,184,.16); border-color: rgba(243,217,184,.8); }
+    #rink-setup .st-nick { position: relative; display: flex; align-items: center; }
+    #rink-setup input { width: 100%; height: 44px; box-sizing: border-box; padding: 0 76px 0 16px; border-radius: 999px;
+      border: 1px solid rgba(246,241,231,.2); background: rgba(255,255,255,.05); color: #f0f6fc; outline: none;
+      font: 500 16px/1 ${HUD_FONT}; letter-spacing: 0; -webkit-user-select: text; user-select: text; touch-action: manipulation; }
+    #rink-setup input::placeholder { color: rgba(240,246,252,.42); }
+    #rink-setup input:focus { border-color: rgba(243,217,184,.7); }
+    #rink-setup input[aria-invalid=true] { border-color: rgba(255,150,150,.85); }
+    #rink-setup .st-count { position: absolute; right: 46px; font-size: 12px; opacity: .5; pointer-events: none; }
+    #rink-setup .st-dice { position: absolute; right: 6px; width: 34px; height: 34px; border-radius: 50%; border: 0; padding: 0;
+      background: none; cursor: pointer; display: flex; align-items: center; justify-content: center; opacity: .75; touch-action: manipulation; }
+    #rink-setup .st-err { min-height: 0; font-size: 12px; color: #ffb4b4; margin-top: 6px; display: none; }
+    #rink-setup .st-err.on { display: block; }
+    #rink-setup .st-swatches { display: flex; justify-content: space-between; gap: 6px; }
+    #rink-setup .st-swatches button { width: 32px; height: 32px; flex: none; border-radius: 50%; padding: 0; cursor: pointer;
+      border: 1px solid rgba(0,0,0,.18); box-shadow: 0 0 0 0 rgba(240,246,252,0); transition: box-shadow .2s, transform .2s;
+      touch-action: manipulation; }
+    #rink-setup .st-swatches button[aria-pressed=true] { box-shadow: 0 0 0 2px rgba(8,14,30,.9), 0 0 0 4px #f0f6fc; transform: scale(1.06); }
+    #rink-setup .st-go { height: 48px; border-radius: 999px; border: 1px solid rgba(243,217,184,.75); background: rgba(243,217,184,.18);
+      font: 600 15px/1 ${HUD_FONT}; letter-spacing: 0; cursor: pointer; touch-action: manipulation; margin-top: 2px; }
+    #rink-setup .st-go:disabled { opacity: .45; cursor: default; }
+    @media (pointer: coarse) { #rink-setup .st-swatches button { width: 34px; height: 34px; } }
+    /* wide screens (PC, landscape phones): the panel sits at the right, the character stands in the middle */
+    @media (orientation: landscape) {
+      #rink-setup { align-items: center; justify-content: flex-end; padding: 12px calc(max(24px, 6vw) + env(safe-area-inset-right)) 12px 12px;
+        background: linear-gradient(to left, rgba(5,10,24,.5), rgba(5,10,24,0) 50%); }
+      #rink-setup .st-panel { width: min(380px, 44vw); max-height: calc(100dvh - 24px); overflow: auto; }
+    }
+    @media (orientation: landscape) and (max-height: 520px) { #rink-setup .st-panel { gap: 10px; padding: 14px; } }`;
+  document.head.appendChild(css);
+  const root = document.createElement('div');
+  root.id = 'rink-setup';
+  root.innerHTML = `
+    <div class="st-panel" role="dialog" aria-label="캐릭터 설정">
+      <div><div class="st-label">캐릭터</div>
+        <div class="st-seg"><button type="button" data-style="skater">남자</button><button type="button" data-style="girl">여자</button></div></div>
+      <div><div class="st-label">닉네임</div>
+        <div class="st-nick"><input type="text" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="go" aria-label="닉네임 (최대 8글자)">
+          <span class="st-count"></span>
+          <button type="button" class="st-dice" aria-label="다른 닉네임 추천"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg></button></div>
+        <div class="st-err" role="alert">닉네임은 최대 8글자까지 입력할 수 있어요.</div></div>
+      <div><div class="st-label">상의 색</div><div class="st-swatches"></div></div>
+      <button type="button" class="st-go">링크장 들어가기</button>
+    </div>`;
+  document.body.appendChild(root);
+  const $ = (q) => root.querySelector(q);
+  const input = $('input'), count = $('.st-count'), err = $('.st-err'), go = $('.st-go');
+  const sw = $('.st-swatches');
+  for (const c of TOP_COLORS) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.dataset.color = String(c.hex); b.setAttribute('aria-label', c.name); b.title = c.name;
+    b.style.background = '#' + c.hex.toString(16).padStart(6, '0');
+    sw.appendChild(b);
+  }
+  if (typeof saved.nick === 'string') input.value = saved.nick;
+  let open = true;
+
+  const nick = () => cleanNick(input.value);
+  const shownName = () => nick() || state.suggestion;
+  function render() {
+    root.querySelectorAll('[data-style]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.style === state.style)));
+    sw.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(Number(b.dataset.color) === state.color)));
+    input.placeholder = state.suggestion;
+    const n = nickLength(nick()), bad = n > NICK_MAX;
+    count.textContent = `${n}/${NICK_MAX}`;
+    input.setAttribute('aria-invalid', String(bad));
+    err.classList.toggle('on', bad);
+    go.disabled = bad;
+    nameTag.set(bad ? '' : shownName());                                // live preview on the real character
+  }
+  function applyLook() {
+    player.setStyle(state.style, prepareRig);
+    player.rig.knit.color.setHex(state.color);                         // only the knit (upper clothing) material
+  }
+  // camera: swing round to the character's front while choosing, framed so the whole character stays clear of the panel
+  // (portrait: panel below → camera a little lower, character in the upper part; landscape / PC: panel at the right →
+  // character in the middle). Everything is restored on entry.
+  const cam0 = { orbitYaw: cine.orbitYaw, lookHeight: cine.lookHeight, radius: cine.targetRadius, pitch: cine.pitch };
+  const wide = matchMedia('(orientation: landscape)');
+  function frame() {
+    if (!open) return;
+    cine.orbitYaw = Math.PI;
+    if (wide.matches) {
+      cine.pitch = 0.3; cine.lookHeight = 0.55; cine.targetRadius = 3.3;
+      // the panel is on the right: shift the picture so the character stands left of centre, clear of it
+      camera.setViewOffset(innerWidth, innerHeight, innerWidth * 0.17, 0, innerWidth, innerHeight);
+    } else {
+      cine.pitch = 0.2; cine.lookHeight = -0.55; cine.targetRadius = 3.5;
+      camera.clearViewOffset();
+    }
+    camera.updateProjectionMatrix();
+  }
+  if (wide.addEventListener) wide.addEventListener('change', frame); else if (wide.addListener) wide.addListener(frame);
+  addEventListener('resize', frame);
+
+  root.addEventListener('click', (e) => {
+    const st = e.target.closest('[data-style]'), co = e.target.closest('[data-color]');
+    if (st) { state.style = st.dataset.style; applyLook(); render(); }
+    else if (co) { state.color = Number(co.dataset.color); applyLook(); render(); }
+    else if (e.target.closest('.st-dice')) { input.value = ''; state.suggestion = randomNick(); render(); }
+    else if (e.target.closest('.st-go')) enter();
+  });
+  root.addEventListener('pointerdown', (e) => e.stopPropagation());
+  input.addEventListener('input', render);
+  // while choosing, keys type into the name field and never steer the skater (WASD / arrows / Esc stay in the page)
+  addEventListener('keydown', (e) => {
+    if (!open) return;
+    e.stopPropagation();
+    if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); enter(); }
+  }, true);
+  addEventListener('keyup', (e) => { if (open) e.stopPropagation(); }, true);
+  // the rink's own buttons rest under the setup (hidden, not removed)
+  const fixedBox = (el) => { while (el && getComputedStyle(el).position !== 'fixed') el = el.parentElement; return el; };
+  const others = () => [document.querySelector('.action-btn')?.parentElement, document.querySelector('.joystick'),
+    ...[...document.querySelectorAll('.hud-btn')].map(fixedBox), document.querySelector('.title')].filter(Boolean);
+  const hideOthers = (h) => others().forEach((el) => { el.style.visibility = h ? 'hidden' : ''; });
+
+  function enter() {
+    if (!open) return;
+    const typed = nick();
+    if (nickLength(typed) > NICK_MAX) { render(); input.focus(); return; }
+    const name = typed || state.suggestion;
+    applyLook();
+    nameTag.set(name);
+    window.PLAYER_PROFILE = { style: state.style, nickname: name, color: state.color };   // (later phases send this to the server)
+    try { localStorage.setItem(PROFILE_KEY, JSON.stringify({ style: state.style, color: state.color, nick: typed })); } catch (e) { /* private mode */ }
+    open = false;
+    input.blur();
+    player.keys.clear();
+    cine.orbitYaw = cam0.orbitYaw; cine.lookHeight = cam0.lookHeight; cine.targetRadius = cam0.radius; cine.pitch = cam0.pitch;   // back behind (eases round)
+    camera.clearViewOffset(); camera.updateProjectionMatrix();
+    root.classList.add('st-out');
+    setTimeout(() => { root.style.display = 'none'; }, 480);
+    hideOthers(false);
+  }
+
+  applyLook();
+  render();
+  frame();
+  hideOthers(true);
+  return { get open() { return open; }, enter, state };
+}
+
 // ===== net/rinkLink.js =====
 // (2026-11-05, Phase 2) connection to the Winterwood multiplayer server (Cloudflare Worker + Durable Object).
 // This phase only connects and enters the shared room — no other players, positions or animations are synced yet.
@@ -6162,6 +6462,7 @@ const playerFill = addSoftFill(player.mesh, LIGHTING.characterFill);
 // Same model and art style; only her outfit, hair and earmuffs differ (buildSkater style 'girl'). No animation,
 // no input, no collision. Natural relaxed standing pose = the original skater's idle pose; she stands a few
 // metres ahead and to the right of the player's starting spot, turned toward the player.
+const TEST_NPC = new URLSearchParams(location.search).get('testnpc') === '1';
 const skater2 = (() => {
   const R = buildSkater({ style: 'girl' }), Lg = R.L;
   for (const [leg, side] of [[R.legL, 1], [R.legR, -1]]) {
@@ -6176,6 +6477,10 @@ const skater2 = (() => {
   R.root.position.set(2.6, world.bounds.iceY, 19.6);
   R.root.rotation.y = Math.atan2(0 - 2.6, world.bounds.rz * 0.7 - 19.6);   // faces the player's start position
   R.root.name = 'Skater2';
+  // (2026-11-05) development-only test character: shown only with ?testnpc=1 in the address. Otherwise she is hidden
+  // (not drawn, not reflected, cannot be tapped) — every skater in the rink is a real player. Her model, animation,
+  // lighting and the partner code are unchanged.
+  R.root.visible = TEST_NPC;
   scene.add(R.root);
   R.softFill = addSoftFill(R.root, LIGHTING.characterFill);                // same character lighting as the player
   return R;
@@ -6252,7 +6557,7 @@ controls.onTap = (ray) => {
   if (proposal.active) return true;
   if (partner.menuOpen || partner.mode === 'dance') return partner.handleTap(ray);
   if (roseCollector.handleTap(ray)) return true;
-  return partner.handleTap(ray);
+  return TEST_NPC ? partner.handleTap(ray) : false;                 // (the hidden test character cannot be tapped)
 };
 
 // ---- bottom action bar (2026-11-03): 안무 연습 · 스핀돌기 · 트리플악셀 (2026-11-05: 축하하기 → 안무 연습) ---------------
@@ -6336,6 +6641,13 @@ function feedJoystick() {
   _joyStick.x = x / l; _joyStick.z = z / l; _joyStick.m = joystick.m;
   player.stick = _joyStick;
 }
+
+// ---- character setup (2026-11-05, Phase 3): model, nickname, top colour → shown after the loading screen -----------
+const nameTag = createNameTag(player, camera);
+const playerSetup = createPlayerSetup({
+  player, cine, camera, nameTag,
+  prepareRig: (rig) => addSoftFill(rig.root, LIGHTING.characterFill, playerFill),   // the other model joins his / her soft light
+});
 
 // ---- post: HDR target with MSAA → bloom → tone mapping ---------------------
 // (2026-11-04) the half-float target needs EXT_color_buffer_float / _half_float; without it the GPU cannot draw into it
@@ -6458,6 +6770,7 @@ function simulate(frameDt, t) {
     skateFx.update(dt);
     skateFx2.update(dt);
   }
+  nameTag.update();                                          // (Phase 3) nickname above his / her head
   world.update(t);
 }
 
@@ -6479,6 +6792,7 @@ function updateFps(realDt) {
   }
 }
 
+if (window.__rinkLoad) window.__rinkLoad(2);   // (2026-11-06) loading progress: page + 3D engine downloaded, rink built
 renderer.setAnimationLoop((now) => {
   const realDt = Math.max(0, (now - last) / 1000);
   last = now;
