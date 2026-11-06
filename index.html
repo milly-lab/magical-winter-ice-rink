@@ -2548,17 +2548,43 @@ function clayMat(color, roughness = 0.78) {
   return new THREE.MeshStandardMaterial({ color, roughness, metalness: 0 });
 }
 
-function buildSkater({ style = 'skater' } = {}) {
+// (2026-11-06, Phase 4) join indexed geometries with the same attributes into one (e.g. the pearl ring of other players)
+function mergeIndexed(geos) {
+  const names = Object.keys(geos[0].attributes), out = new THREE.BufferGeometry(), idx = [];
+  let base = 0;
+  for (const name of names) {
+    const size = geos[0].attributes[name].itemSize, arr = [];
+    for (const g of geos) arr.push(...g.attributes[name].array);
+    out.setAttribute(name, new THREE.Float32BufferAttribute(arr, size));
+  }
+  for (const g of geos) {
+    const n = g.attributes.position.count;
+    if (g.index) for (const i of g.index.array) idx.push(i + base);
+    else for (let i = 0; i < n; i++) idx.push(i + base);
+    base += n; g.dispose();
+  }
+  out.setIndex(idx);
+  return out;
+}
+function buildSkater({ style = 'skater', detail = 1, shared = null } = {}) {
   const girl = style === 'girl';   // second, standing character: skirt, bangs + ponytail, earmuffs (body/face/rig otherwise identical)
+  // (2026-11-06, Phase 4) options for OTHER players' avatars only — the defaults build exactly the model as before:
+  //  - detail < 1: fewer segments on the round shapes (same shapes, proportions, rig and skin weights; the hair keeps a
+  //    little more of its resolution than the rest) and the 20 pearls become one mesh;
+  //  - shared: a cache object — textures and materials (everything except the knit, which carries the top colour) are
+  //    made once and reused by every avatar that passes the same cache.
+  const SEG = (n, min = 6) => (detail >= 1 ? n : Math.max(min, Math.round(n * detail)));
+  const HAIR_SEG = (n) => (detail >= 1 ? n : Math.max(24, Math.round(n * Math.min(1, detail * 0.7))));
+  const MAT = (key, make) => (shared ? (shared[key] || (shared[key] = make())) : make());
   // ---------- materials: soft matte clay skin, fabric with fine grain ----------
-  const grain = (() => {                                   // tiny procedural knit grain for the fabrics
+  const grain = MAT('grain', () => {                       // tiny procedural knit grain for the fabrics
     const n = 128, d = new Uint8Array(n * n * 4);
     for (let i = 0; i < n * n; i++) { const v = 110 + Math.random() * 90; d.set([v, v, v, 255], i * 4); }
     const t = new THREE.DataTexture(d, n, n);
     t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(10, 10); t.needsUpdate = true;
     return t;
-  })();
-  const knitBump = (() => {                                // fine, clean knit rib (bump only — no pattern colour)
+  });
+  const knitBump = MAT('knitBump', () => {                 // fine, clean knit rib (bump only — no pattern colour)
     const cv = document.createElement('canvas'); cv.width = cv.height = 256;
     const g = cv.getContext('2d'), img = g.createImageData(256, 256);
     for (let y = 0; y < 256; y++) for (let x = 0; x < 256; x++) {
@@ -2571,16 +2597,16 @@ function buildSkater({ style = 'skater' } = {}) {
     const t = new THREE.CanvasTexture(cv);
     t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(7, 5);
     return t;
-  })();
+  });
   const C = {
-    skin: new THREE.MeshStandardMaterial({ color: 0xf2d0c0, roughness: 0.9, metalness: 0 }),
-    hair: new THREE.MeshStandardMaterial({ color: 0x593724, roughness: 0.82, metalness: 0 }),   // smooth matte clay
-    knit: new THREE.MeshPhysicalMaterial({ color: 0xf1e8d6, roughness: 0.96, sheen: 0.8, sheenRoughness: 0.7, sheenColor: 0xfff4e4, bumpMap: knitBump, bumpScale: 0.45 }),   // ivory turtleneck knit
-    pants: new THREE.MeshPhysicalMaterial({ color: 0x27272b, roughness: 0.97, sheen: 0.4, sheenRoughness: 0.8, sheenColor: 0x6a6a78, bumpMap: grain, bumpScale: 0.3 }),
-    boot: new THREE.MeshStandardMaterial({ color: 0xf5f5f7, roughness: 0.62, metalness: 0 }),
-    blade: new THREE.MeshStandardMaterial({ color: 0xc6ccd4, roughness: 0.3, metalness: 0.85 }),
-    eye: new THREE.MeshStandardMaterial({ color: 0x17110f, roughness: 0.22 }),
-    lace: new THREE.MeshStandardMaterial({ color: 0xe1e2e8, roughness: 0.85, metalness: 0 }),
+    skin: MAT('skin', () => new THREE.MeshStandardMaterial({ color: 0xf2d0c0, roughness: 0.9, metalness: 0 })),
+    hair: MAT('hair', () => new THREE.MeshStandardMaterial({ color: 0x593724, roughness: 0.82, metalness: 0 })),   // smooth matte clay
+    knit: new THREE.MeshPhysicalMaterial({ color: 0xf1e8d6, roughness: 0.96, sheen: 0.8, sheenRoughness: 0.7, sheenColor: 0xfff4e4, bumpMap: knitBump, bumpScale: 0.45 }),   // ivory turtleneck knit (own colour per skater)
+    pants: MAT('pants', () => new THREE.MeshPhysicalMaterial({ color: 0x27272b, roughness: 0.97, sheen: 0.4, sheenRoughness: 0.8, sheenColor: 0x6a6a78, bumpMap: grain, bumpScale: 0.3 })),
+    boot: MAT('boot', () => new THREE.MeshStandardMaterial({ color: 0xf5f5f7, roughness: 0.62, metalness: 0 })),
+    blade: MAT('blade', () => new THREE.MeshStandardMaterial({ color: 0xc6ccd4, roughness: 0.3, metalness: 0.85 })),
+    eye: MAT('eye', () => new THREE.MeshStandardMaterial({ color: 0x17110f, roughness: 0.22 })),
+    lace: MAT('lace', () => new THREE.MeshStandardMaterial({ color: 0xe1e2e8, roughness: 0.85, metalness: 0 })),
   };
   const sm01 = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
   // (2026-11-05) male hair colour matched to the reference: on screen under the rink's warm lights this shows as a
@@ -2641,11 +2667,12 @@ function buildSkater({ style = 'skater' } = {}) {
     return g;
   };
   head.add(face);
-  face.add(new THREE.Mesh(JAW(new THREE.SphereGeometry(HR, 96, 64)), C.skin));
+  face.add(new THREE.Mesh(JAW(new THREE.SphereGeometry(HR, SEG(96), SEG(64))), C.skin));
   {
     // hair = the head sphere pushed out where hair grows (a single mass, no stuck-on pieces):
     // low side-swept fringe with rounded lock tips, full volume on top and sides, tapered nape
-    const g = new THREE.SphereGeometry(HR, 320, 220);
+    const g = new THREE.SphereGeometry(HR, HAIR_SEG(320), HAIR_SEG(220));
+    const EDGE = detail >= 1 ? 1 : 1.8;   // (other players: fewer rows → a slightly softer hair edge so it stays smooth, not stepped)
     const p = g.attributes.position, d = new THREE.Vector3();
     for (let i = 0; i < p.count; i++) {
       d.fromBufferAttribute(p, i).normalize();
@@ -2665,7 +2692,7 @@ function buildSkater({ style = 'skater' } = {}) {
       const cutBack = -0.68 + 0.06 * (1 - tips) ** 1.5;
       const cut = (cutSide + (cutBack - cutSide) * back) * (1 - front) + cutFront * front;
       const above = d.y - cut;
-      const cover = sm01(-0.03, 0.045, above);                       // soft, smooth hair edge
+      const cover = sm01(-0.03 * EDGE, 0.045 * EDGE, above);         // soft, smooth hair edge (EDGE 1 = as before)
       const hug = 0.3 + 0.7 * sm01(0.0, 0.32, above);                 // lock ends curl in toward the head
       const bangs = girl ? front * (0.018 * sm01(0.03, 0.25, Math.abs(d.x)) - 0.012 * Math.exp(-((d.x / 0.035) ** 2)) * sm01(0.1, 0.5, d.y)) : 0;   // each bang a soft swell, a neat parting between them
       const parting = girl ? 0 : 0.007 * front * Math.exp(-((lockS / 0.14) ** 2)) * sm01(0.0, 0.12, above);   // male: two soft partings between the locks
@@ -2678,7 +2705,7 @@ function buildSkater({ style = 'skater' } = {}) {
   }
   // ears: small flattened round ears at eye level, partly under the hair
   for (const sx of [-1, 1]) {
-    const ear = new THREE.Mesh(new THREE.SphereGeometry(0.058, 40, 28), C.skin);
+    const ear = new THREE.Mesh(new THREE.SphereGeometry(0.058, SEG(40), SEG(28)), C.skin);
     ear.scale.set(0.62, 1.0, 0.85);
     if (MALE_HEAD) ear.scale.multiply(new THREE.Vector3(1.04 / MALE_HEAD.sx, 0.97 / MALE_HEAD.sy, 1));   // same ear as before
     ear.position.set(sx * HR * 1.0, -0.05, -0.025);
@@ -2687,14 +2714,14 @@ function buildSkater({ style = 'skater' } = {}) {
   const onFace = (x, y, z, k = 1.0) => new THREE.Vector3(x, y, z).normalize().multiplyScalar(HR * k);
   const facing = (m, v) => m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), v.clone().normalize());
   for (const sx of [-1, 1]) {                                 // small glossy oval eyes, set low and wide
-    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.0225, 32, 24), C.eye);   // ~18% bigger, rounder (same spot)
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.0225, SEG(32), SEG(24)), C.eye);   // ~18% bigger, rounder (same spot)
     eye.scale.set(0.96, 1.16, 0.5);
     if (MALE_HEAD) eye.scale.multiply(new THREE.Vector3(1.04 / MALE_HEAD.sx, 0.97 / MALE_HEAD.sy, 1));   // same eye size / shape as before
     eye.position.copy(onFace(0.34 * sx, -0.17, 0.92, 0.997));
     facing(eye, eye.position);
     face.add(eye);
   }
-  const nose = new THREE.Mesh(new THREE.SphereGeometry(0.018, 24, 18), C.skin);   // small nose (1.5× the earlier 0.012)
+  const nose = new THREE.Mesh(new THREE.SphereGeometry(0.018, SEG(24), SEG(18)), C.skin);   // small nose (1.5× the earlier 0.012)
   nose.scale.set(1, 0.8, 0.75);
   nose.position.copy(onFace(0, -0.27, 0.96, 0.997));
   face.add(nose);
@@ -2704,19 +2731,19 @@ function buildSkater({ style = 'skater' } = {}) {
     const g = cv.getContext('2d'), gr = g.createRadialGradient(64, 64, 0, 64, 64, 64);
     gr.addColorStop(0, '#fff'); gr.addColorStop(0.35, '#a8a8a8'); gr.addColorStop(0.7, '#2a2a2a'); gr.addColorStop(1, '#000');
     g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
-    const blushMat = new THREE.MeshStandardMaterial({
+    const blushMat = MAT('blush', () => new THREE.MeshStandardMaterial({
       color: 0xf28b96, roughness: 0.9, transparent: true, opacity: 0.6, alphaMap: new THREE.CanvasTexture(cv),
       depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
-    });
+    }));
     for (const sx of [-1, 1]) {
       const dir = new THREE.Vector3(0.5 * sx, -0.31, 0.8).normalize();
       const th = Math.acos(dir.y), ph = Math.atan2(dir.z, -dir.x), w = 0.24;
-      const patch = new THREE.Mesh(JAW(new THREE.SphereGeometry(HR * 1.0025, 24, 24, ph - w, 2 * w, th - w, 2 * w)), blushMat);   // (follows the jaw taper)
+      const patch = new THREE.Mesh(JAW(new THREE.SphereGeometry(HR * 1.0025, SEG(24), SEG(24), ph - w, 2 * w, th - w, 2 * w)), blushMat);   // (follows the jaw taper)
       patch.renderOrder = 2;
       face.add(patch);
     }
   }
-  const neckSkin = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.062, 0.12, 20), C.skin);
+  const neckSkin = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.062, 0.12, SEG(20)), C.skin);
   neckSkin.position.y = 0.02;
   neck.add(neckSkin);
   if (girl) {
@@ -2725,7 +2752,7 @@ function buildSkater({ style = 'skater' } = {}) {
     const pts = [[0, 0.1, -0.25], [0, 0.08, -0.335], [0, -0.02, -0.372], [0, -0.14, -0.384], [0, -0.26, -0.383], [0, -0.37, -0.374], [0, -0.45, -0.362]]
       .map(([x, y, z]) => new THREE.Vector3(x, y, z));
     const curve = new THREE.CatmullRomCurve3(pts);
-    const TS = 120, RS = 28, tg = new THREE.TubeGeometry(curve, TS, 1, RS, false), tp = tg.attributes.position, c = new THREE.Vector3();
+    const TS = SEG(120), RS = SEG(28), tg = new THREE.TubeGeometry(curve, TS, 1, RS, false), tp = tg.attributes.position, c = new THREE.Vector3();
     for (let j = 0; j <= TS; j++) {
       const u = j / TS;
       const r = (0.054 + 0.014 * sm01(0.02, 0.2, u) + 0.006 * sm01(0.35, 0.85, u)) * Math.sqrt(Math.max(0, 1 - (Math.max(0, u - 0.88) / 0.12) ** 2));
@@ -2740,21 +2767,28 @@ function buildSkater({ style = 'skater' } = {}) {
     keep.scale.set(1.04 / MALE_HEAD.sx, 0.97 / MALE_HEAD.sy, 0.98 / MALE_HEAD.sz);
     face.add(keep);
     keep.add(new THREE.Mesh(tg, C.hair));
-    const tipBall = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 18), C.hair);
+    const tipBall = new THREE.Mesh(new THREE.SphereGeometry(1, SEG(24), SEG(18)), C.hair);
     curve.getPointAt(1, c); tipBall.position.copy(c); tipBall.scale.setScalar(0.004);   // just closes the rounded end's pole
     keep.add(tipBall);
     // pearl hair tie: a neat ring of small luminous ivory pearls with a silvery sheen around the ponytail base
     {
-      const pearl = new THREE.MeshPhysicalMaterial({
+      const pearl = MAT('pearl', () => new THREE.MeshPhysicalMaterial({
         color: 0xf4efe4, roughness: 0.16, metalness: 0.12, clearcoat: 1, clearcoatRoughness: 0.06,
         sheen: 0.5, sheenColor: 0xdde5f0, sheenRoughness: 0.25, iridescence: 0.25, iridescenceIOR: 1.4,
-      });
-      const pg = new THREE.SphereGeometry(0.0115, 20, 14), N = 20, RR = 0.0715;
+      }));
+      const pg = new THREE.SphereGeometry(0.0115, SEG(20), SEG(14)), N = 20, RR = 0.0715;
       const tie = new THREE.Group();
-      for (let k = 0; k < N; k++) {
-        const t = (k / N) * Math.PI * 2, m = new THREE.Mesh(pg, pearl);
-        m.position.set(Math.cos(t) * RR, Math.sin(t) * RR, 0);
-        tie.add(m);
+      if (detail >= 1) {
+        for (let k = 0; k < N; k++) {
+          const t = (k / N) * Math.PI * 2, m = new THREE.Mesh(pg, pearl);
+          m.position.set(Math.cos(t) * RR, Math.sin(t) * RR, 0);
+          tie.add(m);
+        }
+      } else {                                                // (other players) the same 20 pearls as ONE mesh
+        tie.add(new THREE.Mesh(mergeIndexed(Array.from({ length: N }, (_, k) => {
+          const t = (k / N) * Math.PI * 2;
+          return pg.clone().translate(Math.cos(t) * RR, Math.sin(t) * RR, 0);
+        })), pearl));
       }
       tie.position.copy(curve.getPointAt(0.1));
       tie.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), curve.getTangentAt(0.1));   // band wraps around the tail
@@ -2762,9 +2796,9 @@ function buildSkater({ style = 'skater' } = {}) {
     }
 
     // ivory fluffy earmuffs: two soft round covers over the ears + a simple curved headband over the hair
-    const fur = new THREE.MeshPhysicalMaterial({ color: 0xf4ecdc, roughness: 1, sheen: 1, sheenRoughness: 0.45, sheenColor: 0xffffff, bumpMap: grain, bumpScale: 0.8 });
-    const band = new THREE.MeshStandardMaterial({ color: 0xece2cf, roughness: 0.55 });
-    const fg = new THREE.IcosahedronGeometry(1, 5), fp = fg.attributes.position, q = new THREE.Vector3();
+    const fur = MAT('fur', () => new THREE.MeshPhysicalMaterial({ color: 0xf4ecdc, roughness: 1, sheen: 1, sheenRoughness: 0.45, sheenColor: 0xffffff, bumpMap: grain, bumpScale: 0.8 }));
+    const band = MAT('band', () => new THREE.MeshStandardMaterial({ color: 0xece2cf, roughness: 0.55 }));
+    const fg = new THREE.IcosahedronGeometry(1, detail >= 1 ? 5 : 4), fp = fg.attributes.position, q = new THREE.Vector3();
     for (let i = 0; i < fp.count; i++) {                       // gentle fluffy lumps (still a smooth clay form)
       q.fromBufferAttribute(fp, i);
       const k = 1 + 0.05 * Math.sin(q.x * 9 + q.y * 7) * Math.sin(q.y * 8 - q.z * 9) + 0.03 * Math.sin(q.z * 13 + q.x * 5);
@@ -2780,7 +2814,7 @@ function buildSkater({ style = 'skater' } = {}) {
     }
     const arc = [];
     for (let k = 0; k <= 24; k++) { const a = Math.PI * (k / 24); arc.push(new THREE.Vector3(Math.cos(a) * 0.3255, -0.04 + Math.sin(a) * 0.37, -0.03)); }
-    face.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(arc), 64, 0.016, 12, false), band));
+    face.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(arc), SEG(64), 0.016, SEG(12), false), band));
   }
 
   // ---------- turtleneck knit body: one soft rounded shell with a ribbed hem band ----------
@@ -2794,7 +2828,7 @@ function buildSkater({ style = 'skater' } = {}) {
     [0.217, -0.1], [0.221, -0.06], [0.219, 0.04], [0.219, 0.16], [0.221, 0.25], [0.214, 0.315],
     [0.199, 0.37], [0.176, 0.41], [0.146, 0.442], [0.113, 0.466], [0.09, 0.481], [0.078, 0.495],
     [0.068, 0.5], [0.06, 0.492],
-  ].map(([r, y]) => [r, SQ(TY(SHORT(y)))])), 96), C.knit);
+  ].map(([r, y]) => [r, SQ(TY(SHORT(y)))])), SEG(96)), C.knit);
   hoodieBody.scale.set(HB.sx, 1, HB.sz);
   torso.add(hoodieBody);
   // ---------- turtleneck: a soft folded collar hugging the neck, the head resting just inside it ----------
@@ -2802,7 +2836,7 @@ function buildSkater({ style = 'skater' } = {}) {
     const collar = new THREE.Mesh(new THREE.LatheGeometry(prof([
       [0.1, 0.4], [0.13, 0.415], [0.152, 0.435], [0.16, 0.46], [0.157, 0.482], [0.147, 0.498],
       [0.13, 0.508], [0.11, 0.51], [0.09, 0.502], [0.075, 0.49],
-    ].map(([r, y]) => [r, SQ(y)])), 96), C.knit);
+    ].map(([r, y]) => [r, SQ(y)])), SEG(96)), C.knit);
     collar.scale.set(1.1, 1, 1.0);
     torso.add(collar);
   }
@@ -2810,7 +2844,7 @@ function buildSkater({ style = 'skater' } = {}) {
   // ---------- pants waist (separate garment) ----------
   const waist = new THREE.Mesh(new THREE.LatheGeometry(prof([
     [0.0, -0.165], [0.07, -0.16], [0.14, -0.13], [0.17, -0.07], [0.176, 0.0], [0.172, 0.06], [0.166, 0.085],
-  ]), 36), C.pants);
+  ]), SEG(36)), C.pants);
   waist.scale.set(1.12, 1, 0.92);
   pelvis.add(waist);
 
@@ -2854,7 +2888,7 @@ function buildSkater({ style = 'skater' } = {}) {
   // frame: joint group the samples are written in; joints: bone parents; weights(y) → one weight per joint
   const skinLimb = (frame, joints, samples, weights, mat) => {
     const bones = joints.map((j) => { const b = new THREE.Bone(); j.add(b); return b; });
-    const { g, ys } = tube(samples, 48);
+    const { g, ys } = tube(samples, SEG(48));
     const si = [], sw = [];
     for (const y of ys) {
       const w = weights(y), s = w.reduce((a, b) => a + b, 0);
@@ -2882,12 +2916,12 @@ function buildSkater({ style = 'skater' } = {}) {
       [-0.3852, 0.081], [-0.396, 0.08], [-0.4095, 0.079], [-0.4176, 0.074], [-0.4221, 0.066], [-0.4203, 0.058],
     ], (y) => { const f = sm01(-0.1755, -0.2745, y); return [1 - f, f]; }, C.knit);
     // elbow filler: a ball on the pivot keeps the bend full instead of pinching
-    elbow.add(new THREE.Mesh(new THREE.SphereGeometry(0.085, 32, 24), C.knit));
+    elbow.add(new THREE.Mesh(new THREE.SphereGeometry(0.085, SEG(32), SEG(24)), C.knit));
     // hand: one big smooth ball coming out of the cuff (no fingers, no thumb) — same size as the ears
     const hand = new THREE.Group();
     hand.position.y = -L.fore;
     elbow.add(hand);
-    const palm = new THREE.Mesh(new THREE.SphereGeometry(HAND_R, 48, 36), C.skin);
+    const palm = new THREE.Mesh(new THREE.SphereGeometry(HAND_R, SEG(48), SEG(36)), C.skin);
     palm.position.y = -0.05;
     hand.add(palm);
     return { shoulder, elbow };
@@ -2916,14 +2950,14 @@ function buildSkater({ style = 'skater' } = {}) {
         [-0.53, 0.116], [-0.552, 0.118], [-0.563, 0.115], [-0.569, 0.11], [-0.567, 0.105],
       ], legW, C.pants);
       // knee filler (same idea as the elbow)
-      knee.add(new THREE.Mesh(new THREE.SphereGeometry(0.099, 32, 24), C.pants));
+      knee.add(new THREE.Mesh(new THREE.SphereGeometry(0.099, SEG(32), SEG(24)), C.pants));
     } else {
       // bare leg under the mini skirt: round hip ball → slim leg → into the boot shaft
       skinLimb(hip, [hip, knee, ankle], [
         ...dome(0.094),
         [-0.05, 0.094], [-0.2, 0.088], [-0.36, 0.079], [-0.45, 0.075], [-0.52, 0.073], [-0.54, 0.064],
       ], legW, C.skin);
-      knee.add(new THREE.Mesh(new THREE.SphereGeometry(0.076, 24, 18), C.skin));
+      knee.add(new THREE.Mesh(new THREE.SphereGeometry(0.076, SEG(24), SEG(18)), C.skin));
       // (2026-11-06) black shorts under the skirt: a thin skinned sleeve over the top of each thigh (same black as the
       // skirt / waist, same bend weights as the leg) ending a little above the skirt hem — when a thigh lifts in a spin,
       // black shorts show instead of bare thigh. The skirt, legs and rig are unchanged.
@@ -2939,12 +2973,12 @@ function buildSkater({ style = 'skater' } = {}) {
       [-0.6, 0.1], [-0.66, 0.1], [-0.7, 0.097], [-0.73, 0.085], [-0.75, 0.06], [-0.758, 0.0005],
     ], legW, C.boot);
     // foot: 20% longer than before (0.306 → 0.367 m) and a touch fuller; the extra length goes mostly to the toe
-    const boot = new THREE.Mesh(new THREE.CapsuleGeometry(0.097, 0.173, 16, 40), C.boot);
+    const boot = new THREE.Mesh(new THREE.CapsuleGeometry(0.097, 0.173, SEG(16, 4), SEG(40)), C.boot);
     boot.rotation.x = Math.PI / 2; boot.scale.set(1, 1, 0.92); boot.position.set(0, 0.012, 0.0615);
     ankle.add(boot);
     // laces: a few soft rounded loops across the instep, alternating slightly like criss-cross lacing
     for (let k = 0; k < 4; k++) {
-      const A = 1.15, lg = new THREE.TorusGeometry(0.052, 0.0055, 10, 28, A);
+      const A = 1.15, lg = new THREE.TorusGeometry(0.052, 0.0055, SEG(10, 4), SEG(28), A);
       lg.rotateZ(Math.PI / 2 - A / 2);
       const lace = new THREE.Mesh(lg, C.lace);
       const z = 0.108 + k * 0.017;
@@ -2966,7 +3000,7 @@ function buildSkater({ style = 'skater' } = {}) {
         return h;
       };
       sh.holes.push(win(Z(-0.075), Z(-0.012), B + 0.014, -0.074, 0.01), win(Z(0.012), Z(0.085), B + 0.014, -0.074, 0.01));
-      const hg = new THREE.ExtrudeGeometry(sh, { depth: 0.012, bevelEnabled: true, bevelThickness: 0.003, bevelSize: 0.0025, bevelSegments: 3, curveSegments: 10 });
+      const hg = new THREE.ExtrudeGeometry(sh, { depth: 0.012, bevelEnabled: true, bevelThickness: 0.003, bevelSize: 0.0025, bevelSegments: 3, curveSegments: SEG(10, 4) });
       hg.translate(0, 0, -0.006); hg.rotateY(-Math.PI / 2);   // profile drawn in (z, y); thickness along x
       ankle.add(new THREE.Mesh(hg, C.blade));
     }
@@ -2977,7 +3011,7 @@ function buildSkater({ style = 'skater' } = {}) {
     // simple black A-line mini skirt hanging from the hips (top tucked under the knit hem)
     const skirt = new THREE.Mesh(new THREE.LatheGeometry(prof([      // profile listed bottom → top so the surface faces outward
       [0.238, -0.224], [0.258, -0.226], [0.264, -0.212], [0.252, -0.185], [0.226, -0.12], [0.203, -0.05], [0.19, 0.0],
-    ]), 72), C.pants);
+    ]), SEG(72)), C.pants);
     skirt.scale.set(1.12, 1, 0.95);
     pelvis.add(skirt);
   }
@@ -2999,7 +3033,33 @@ function buildSkater({ style = 'skater' } = {}) {
     mesh.bind(new THREE.Skeleton(bones));
   }
   root.traverse((o) => { if (o.isMesh) o.castShadow = false; });
+  if (detail < 1) mergeStaticParts(root);   // (other players) fewer draw calls — same shapes, same places
   return rig;
+}
+
+// (2026-11-06, Phase 4, other players only) under each joint, the plain (not skinned) pieces that share one material
+// (e.g. face + ears + nose, both eyes, both blush patches, both earmuffs) are joined into one mesh. Each piece's own
+// position / rotation / scale is baked into the joined shape, so nothing moves; mirrored pieces are left alone.
+function mergeStaticParts(root) {
+  const parents = [];
+  root.traverse((o) => parents.push(o));
+  for (const par of parents) {
+    const groups = new Map();
+    for (const c of par.children) {
+      if (!c.isMesh || c.isSkinnedMesh || c.children.length || c.matrix.determinant() < 0) continue;
+      const key = c.material.uuid + '|' + Object.keys(c.geometry.attributes).sort().join(',');
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(c);
+    }
+    for (const list of groups.values()) {
+      if (list.length < 2) continue;
+      const geos = list.map((c) => { c.updateMatrix(); return c.geometry.clone().applyMatrix4(c.matrix); });
+      const m = new THREE.Mesh(mergeIndexed(geos), list[0].material);
+      m.renderOrder = list[0].renderOrder;
+      for (const c of list) { par.remove(c); }
+      par.add(m);
+    }
+  }
 }
 
 const lerp = (a, b, t) => a + (b - a) * t;
@@ -6495,6 +6555,117 @@ skateFx.setViewportHeight(renderer.getDrawingBufferSize(new THREE.Vector2()).y);
 const skateFx2 = new SkateFX(scene, { rig: skater2, mesh: skater2.root }, world.bounds);
 skateFx2.setViewportHeight(renderer.getDrawingBufferSize(new THREE.Vector2()).y);
 
+// ===== player/remoteSkaters.js =====
+// (2026-11-06, Phase 4) OTHER players' avatars, drawn as cheaply as possible (no networking here yet — Phase 5 will move
+// them). The local player and every existing system are untouched; this only adds:
+//  - a lighter build of the same character (buildSkater detail 0.5: fewer segments, joined static parts, one pearl
+//    mesh) whose textures, materials and shapes are shared by all avatars of the same style (only the top colour is
+//    each avatar's own);
+//  - one animation update per avatar per drawn frame (not per 1/240 s physics step), with the same skating motion;
+//  - off-screen avatars (body AND its ice reflection out of view) are hidden and not animated — kept, not reset;
+//  - the ice reflection only for avatars near the local skater (in within 10 m, out beyond 11 m, so no flicker);
+//  - no ice dust / blade marks for them.
+const REMOTE = { detail: 0.5, reflectIn: 10, reflectOut: 11, cullRadius: 2.3 };
+const remoteSkaters = (() => {
+  const shared = {};                  // textures + materials shared by every remote avatar
+  const templates = {};               // style → first built root (its shapes are reused by later avatars)
+  const fill = { value: new THREE.Color(LIGHTING.characterFill.color).multiplyScalar(LIGHTING.characterFill.intensity) };
+  const list = [];
+  const frustum = new THREE.Frustum(), projView = new THREE.Matrix4(), sphere = new THREE.Sphere();
+  const none = new Set();
+  const meshesOf = (root) => { const out = []; root.traverse((o) => { if (o.isMesh) out.push(o); }); return out; };
+  const stats = { total: 0, drawn: 0, reflected: 0, animated: 0 };
+
+  function add({ id, style = 'skater', color = TOP_COLORS[0].hex, x = 0, z = 0, heading = 0 } = {}) {
+    const rig = buildSkater({ style, detail: REMOTE.detail, shared });
+    const meshes = meshesOf(rig.root);
+    const tpl = templates[style];
+    if (tpl && tpl.length === meshes.length) {   // reuse the first avatar's shapes (same build order → same list)
+      for (let i = 0; i < meshes.length; i++) {
+        const g = meshes[i].geometry;
+        if (g !== tpl[i].geometry) { meshes[i].geometry = tpl[i].geometry; g.dispose(); }
+      }
+    } else templates[style] = meshes;
+    rig.knit.color.setHex(color);
+    rig.root.position.set(x, world.bounds.iceY, z);
+    rig.root.rotation.y = heading;
+    rig.root.name = 'Remote:' + id;
+    addSoftFill(rig.root, LIGHTING.characterFill, fill);           // same character lighting as the player
+    scene.add(rig.root);
+    const a = {
+      id, style, rig, meshes, root: rig.root,
+      anim: { rig, keys: none, stick: null, target: null, glide: 0, phase: 0, time: 0, roll: 0 },
+      speed: 0, yawRate: 0, pushing: false, reflected: true, drawn: true,
+    };
+    list.push(a);
+    return a;
+  }
+  function remove(a) {
+    const i = list.indexOf(a); if (i < 0) return;
+    list.splice(i, 1);
+    scene.remove(a.root);
+    a.rig.knit.dispose();             // (shapes and other materials are shared — kept)
+  }
+  const setReflected = (a, on) => {
+    if (a.reflected === on) return;
+    a.reflected = on;
+    const mask = on ? 1 : (1 << EXTERIOR_LAYER);                  // layer 1: seen by the camera, skipped by the ice mirror
+    for (const m of a.meshes) m.layers.mask = mask;
+  };
+  // once per drawn frame, after the camera has moved; dt = the simulated time of this frame
+  function update(dt) {
+    if (!list.length) return;
+    camera.updateMatrixWorld();
+    projView.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    frustum.setFromProjectionMatrix(projView);
+    const P = player.mesh.position, iy = world.bounds.iceY;
+    let drawn = 0, refl = 0;
+    for (const a of list) {
+      const p = a.root.position;
+      sphere.center.set(p.x, iy, p.z); sphere.radius = REMOTE.cullRadius;   // body above + reflection below the ice
+      a.drawn = frustum.intersectsSphere(sphere);
+      a.root.visible = a.drawn;
+      if (!a.drawn) continue;
+      drawn++;
+      const d = Math.hypot(p.x - P.x, p.z - P.z);
+      if (d < REMOTE.reflectIn) setReflected(a, true); else if (d > REMOTE.reflectOut) setReflected(a, false);
+      if (a.reflected) refl++;
+      a.anim.keys = a.pushing ? PUSH_KEYS : none;
+      PlaceholderPlayer.prototype._animate.call(a.anim, dt, a.speed, a.yawRate);
+    }
+    stats.total = list.length; stats.drawn = drawn; stats.reflected = refl; stats.animated = drawn;
+  }
+  const PUSH_KEYS = new Set(['w']);
+  return { add, remove, update, list, stats };
+})();
+
+// development-only measurement fixture: ?testremotes=N (1–8) adds N avatars skating loops around the tree.
+// Without it nothing is added (no avatars, no cost).
+const TEST_REMOTES = Math.min(8, Math.max(0, parseInt(new URLSearchParams(location.search).get('testremotes'), 10) || 0));
+const remoteFixture = (() => {
+  if (!TEST_REMOTES) return null;
+  const loops = [];
+  for (let i = 0; i < TEST_REMOTES; i++) {
+    const A = 16 + (i % 4) * 9, B = 20 + (i % 3) * 3.5, w = (i % 2 ? -1 : 1) * 4.2 / ((A + B) / 2), ph = i * 1.7;
+    const a = remoteSkaters.add({ id: 'test' + i, style: i % 2 ? 'girl' : 'skater', color: TOP_COLORS[(i * 3 + 1) % 8].hex });
+    loops.push({ a, A, B, w, ph, prevYaw: null });
+  }
+  return {
+    step(dt) {
+      for (const L of loops) {
+        L.ph += L.w * dt;
+        const x = L.A * Math.cos(L.ph), z = L.B * Math.sin(L.ph);
+        const vx = -L.A * Math.sin(L.ph) * L.w, vz = L.B * Math.cos(L.ph) * L.w;
+        const yaw = Math.atan2(vx, vz);
+        L.a.root.position.x = x; L.a.root.position.z = z; L.a.root.rotation.y = yaw;
+        L.a.speed = Math.hypot(vx, vz); L.a.pushing = true;
+        L.a.yawRate = L.prevYaw === null || dt <= 0 ? 0 : Math.atan2(Math.sin(yaw - L.prevYaw), Math.cos(yaw - L.prevYaw)) / dt;
+        L.prevYaw = yaw;
+      }
+    },
+  };
+})();
+
 // ---- partner skating (click her: Help · Hold Hands · Dance) -----------------
 const partner = new PartnerSkating({
   player, her: skater2, bounds: world.bounds, camera, dom: renderer.domElement,
@@ -6769,6 +6940,8 @@ function simulate(frameDt, t) {
     roseCollector.update(dt);
     skateFx.update(dt);
     skateFx2.update(dt);
+    if (remoteFixture) remoteFixture.step(dt);                 // (dev-only ?testremotes=N)
+    remoteSkaters.update(dt);                                  // (Phase 4) other players: once per frame, after the camera
   }
   nameTag.update();                                          // (Phase 3) nickname above his / her head
   world.update(t);
