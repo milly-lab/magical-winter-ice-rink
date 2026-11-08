@@ -13,6 +13,10 @@
 !/assets/
 !/assets/*
 !/server/
+!/music/
+!/music/*
+!/sound/
+!/sound/*
 
 # never commit
 node_modules/
