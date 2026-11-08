@@ -21,14 +21,19 @@
 //   client → server
 //     {t:"join", nick, style:"skater"|"girl", color, x, z, h}   enter the rink with a profile + position (again = refresh)
 //     {t:"mv", x, z, h, v, f, ts}                                own position / heading / speed / flags / sender clock (ms)
+//     {t:"act", k, n, x, z, h, v, ts}                            (Phase 6) a move starts: k = "axel" | "spin" | "routine",
+//                                                                n = the sender's move number (always increasing)
+//     {t:"act-end", n}                                           (Phase 6) that move finished
 //   server → client
 //     {t:"welcome", id, players, max}                            (Phase 1) connection accepted
 //     {t:"join-ok", id, players, max, peers:[P…]}                the players already skating (never yourself)
 //     {t:"peer", …P}                                             someone entered (or re-sent their profile)
 //     {t:"mv", id, x, z, h, v, f, ts}                            someone moved
+//     {t:"act", id, k, n, x, z, h, v, ts}                        (Phase 6) someone started a move
+//     {t:"act-end", id, n}                                       (Phase 6) …and finished it
 //     {t:"leave", id, players}                                   someone left / was disconnected
 //     {t:"count", players}                                       the number of connected players changed
-//   P = {id, nick, style, color, x, z, h, v, f}
+//   P = {id, nick, style, color, x, z, h, v, f, act?}   act = {k, n, age} (ms since it started) while a move is running
 // Every value is checked (types, ranges, the 8 top colours, nickname length / characters); bad messages get an
 // "error" reply and a client that keeps sending them is disconnected. Nothing is stored permanently: the player
 // list is the open connections themselves (their attachments survive hibernation).
@@ -36,7 +41,10 @@
 // the old one at once (it is closed with 4003 and removed for everyone) — e.g. a phone coming back from the
 // background. Connections that went silent (no "ping" and no message for 75 s, e.g. a phone that was locked) are
 // removed by a sweep every 30 s, which runs only while someone is connected.
-// NOT implemented yet: jumps / spins / interaction requests (later phases).
+// Phase 6 (2026-11-08): moves (Triple Axel, Spin, 안무 연습) are relayed as start / end events — the id always comes from
+// the connection (never from the message), a new move is refused while the previous one can still be running (each
+// move has a fixed length), move numbers must increase (no duplicates / replays), and only skaters in the rink get them.
+// NOT implemented yet: interaction requests (later phases).
 //
 // Nothing secret lives here: allowed origins and limits are plain settings in wrangler.jsonc ("vars").
 
@@ -61,6 +69,9 @@ const STYLES = ['skater', 'girl'];
 const TOP_COLORS = [0xf1e8d6, 0xf3cfd4, 0xf5d6bf, 0xf2e6b3, 0xcbe8da, 0xc7dcf2, 0xcfd0f2, 0xe8d2ec];   // = the page's 8 choices
 const LIMIT_X = 70, LIMIT_Z = 37;       // a little outside the rink (66.6 × 33.3 half sizes)
 const SID_RE = /^[A-Za-z0-9_-]{16,64}$/;
+// Phase 6 — moves: a new move sooner than ~80% of the previous one's length is refused (the real lengths never trip it,
+// whatever the frame rate or network timing) and when the server stops reporting it as running
+const ACTS = { axel: { min: 2000, max: 6000 }, spin: { min: 8800, max: 14000 }, routine: { min: 23000, max: 32000 } };   // (measured: 2.5 s · 11.0 s · 28.9 s)
 const BAD_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/;
 
 // ---------- helpers ----------
@@ -92,7 +103,8 @@ function cleanProfile(m) {
   if (len < 1 || len > NICK_MAX || utf8.encode(nick).length > 64 || BAD_CHARS.test(nick)) return null;
   return { n: nick, s: m.style, c: m.color };
 }
-const peerOf = (a) => ({ id: a.id, nick: a.p.n, style: a.p.s, color: a.p.c, x: a.st[0], z: a.st[1], h: a.st[2], v: a.st[3], f: a.st[4] });
+const actOf = (a, now) => (a.act && !a.act.done && now - a.act.at < ACTS[a.act.k].max ? { k: a.act.k, n: a.act.n, age: now - a.act.at } : undefined);
+const peerOf = (a, now = Date.now()) => ({ id: a.id, nick: a.p.n, style: a.p.s, color: a.p.c, x: a.st[0], z: a.st[1], h: a.st[2], v: a.st[3], f: a.st[4], act: actOf(a, now) });
 
 // ---------- Worker: routes requests ----------
 export default {
@@ -264,6 +276,31 @@ export class RinkRoom extends DurableObject {
       a.st = st;
       ws.serializeAttachment(a);
       this._broadcast({ t: 'mv', id: a.id, x: st[0], z: st[1], h: st[2], v: st[3], f: st[4], ts: Math.floor(msg.ts || 0) }, ws);
+      await this._save();
+      return;
+    }
+    if (msg.t === 'act') {                                     // (Phase 6) a move starts
+      if (!a.p) { await bad('not-joined'); return; }
+      const st = cleanState(msg, false);                       // (position / heading / speed; no push flag)
+      if (!st || !ACTS[msg.k] || !Number.isInteger(msg.n) || msg.n < 1 || msg.n > 2147483647
+        || !(msg.ts === undefined || num(msg.ts, 0, 9007199254740991))) { await bad('bad-data'); return; }
+      if (a.act && msg.n <= a.act.n) { await bad('dup-act'); return; }                       // duplicate / replayed
+      if (a.act && !a.act.done && now - a.act.at < ACTS[a.act.k].min) { await bad('busy'); return; }   // still running
+      a.act = { k: msg.k, n: msg.n, at: now, done: false };
+      a.st = st;
+      ws.serializeAttachment(a);
+      this._broadcast({ t: 'act', id: a.id, k: msg.k, n: msg.n, x: st[0], z: st[1], h: st[2], v: st[3], ts: Math.floor(msg.ts || 0) }, ws);
+      await this._save();
+      return;
+    }
+    if (msg.t === 'act-end') {                                 // (Phase 6) …and ends (an unknown / old number is ignored)
+      if (!a.p) { await bad('not-joined'); return; }
+      if (!Number.isInteger(msg.n)) { await bad('bad-data'); return; }
+      if (a.act && a.act.n === msg.n && !a.act.done) {
+        a.act.done = true;
+        ws.serializeAttachment(a);
+        this._broadcast({ t: 'act-end', id: a.id, n: msg.n }, ws);
+      }
       await this._save();
       return;
     }

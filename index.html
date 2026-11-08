@@ -6322,6 +6322,7 @@ const RINK_LINK = (() => {
     joined: false,            // (Phase 5) entered the shared rink on this connection (join-ok received)
     spawned: false,           // (Phase 5) the random start spot was chosen (only once, before the first setup)
     sent: { t: -Infinity, x: 0, z: 0, h: 0, v: 0, f: -1 }, sendNow: false, lastJoin: -Infinity,
+    actN: 0, actNow: 0,       // (Phase 6) own move number (kept across reconnects, always increasing) / the running one
   };
   const el = document.getElementById('rink-loading');
   const toast = (t, s = 3) => { try { STORY_UI.toast(t, s); } catch (e) { /* (UI not ready) */ } };
@@ -6393,6 +6394,8 @@ const RINK_LINK = (() => {
       else if (m.t === 'join-ok') { L.joined = true; L.players = m.players; hud(); remotePlayers.reset(m.peers); L.sendNow = true; }
       else if (m.t === 'peer') { if (L.joined) { remotePlayers.upsert(m); L.sendNow = true; } }   // (newcomer: send them our state)
       else if (m.t === 'mv') { if (L.joined) remotePlayers.move(m); }
+      else if (m.t === 'act') { if (L.joined) remotePlayers.act(m); }          // (Phase 6) moves
+      else if (m.t === 'act-end') { if (L.joined) remotePlayers.actEnd(m); }
       else if (m.t === 'leave') { remotePlayers.remove(m.id); L.players = m.players; hud(); }
       else if (m.t === 'count') { L.players = m.players; hud(); }
       else if (m.t === 'notice' && m.reason === 'daily-limit-soon') { /* players already inside keep playing */ }
@@ -6507,6 +6510,19 @@ const RINK_LINK = (() => {
     if (!send({ t: 'mv', x: s.x, z: s.z, h: s.h, v: s.v, f: s.f, ts: Math.round(now) })) return;
     S.t = now; S.x = s.x; S.z = s.z; S.h = s.h; S.v = s.v; S.f = s.f; L.sendNow = false;
   }
+  // (Phase 6) own move started / finished: one message each (with the start spot, so it also counts as a position)
+  function act(k) {
+    L.actN += 1; L.actNow = L.actN;
+    if (!L.joined) return;
+    const s = selfState(), now = performance.now();
+    if (send({ t: 'act', k, n: L.actN, x: s.x, z: s.z, h: s.h, v: s.v, ts: Math.round(now) })) {
+      const S = L.sent; S.t = now; S.x = s.x; S.z = s.z; S.h = s.h; S.v = s.v;
+    }
+  }
+  function actEnd() {
+    const n = L.actNow; L.actNow = 0;
+    if (n && L.joined) send({ t: 'act-end', n });
+  }
   // first entry while online: start somewhere random on the ice (not on the island), facing the tree
   function spawnAtRandom() {
     const b = world.bounds, P = player;
@@ -6545,7 +6561,7 @@ const RINK_LINK = (() => {
   return {
     start() { connect(); },
     profileReady() { sendJoin(); },                                   // (Phase 5) setup screen done
-    tick,
+    tick, act, actEnd,                                                // (Phase 6) own moves
     get joined() { return L.joined; },
     get mode() { return L.mode; },
     get id() { return L.id; },
@@ -6688,10 +6704,17 @@ const remoteSkaters = (() => {
     rig.root.name = 'Remote:' + id;
     addSoftFill(rig.root, LIGHTING.characterFill, fill);           // same character lighting as the player
     scene.add(rig.root);
+    // (Phase 6) `anim` is a small stand-in for a PlaceholderPlayer, so the SAME skating / move code of the local player
+    // (_animate, Triple Axel, Spin, Choreography) can play on this avatar — nothing of the moves is re-written here
+    const anim = Object.assign(Object.create(PlaceholderPlayer.prototype), {
+      rig, keys: none, stick: null, target: null, glide: 0, phase: 0, time: 0, roll: 0,
+      mesh: rig.root, bounds: world.bounds, velocity: new THREE.Vector3(), heading,
+      trick: null, spin: null, routine: null, glideOut: false, glideOutState: null,
+    });
     const a = {
-      id, style, rig, meshes, root: rig.root,
-      anim: { rig, keys: none, stick: null, target: null, glide: 0, phase: 0, time: 0, roll: 0 },
-      speed: 0, yawRate: 0, pushing: false, reflected: true, drawn: true,
+      id, style, rig, meshes, root: rig.root, anim,
+      speed: 0, yawRate: 0, pushing: false, reflected: true, drawn: true, heading,
+      act: null,                      // (Phase 6) the move being shown: { k, n, t }
     };
     list.push(a);
     return a;
@@ -6727,12 +6750,59 @@ const remoteSkaters = (() => {
       if (d < REMOTE.reflectIn) setReflected(a, true); else if (d > REMOTE.reflectOut) setReflected(a, false);
       if (a.reflected) refl++;
       a.anim.keys = a.pushing ? PUSH_KEYS : none;
-      PlaceholderPlayer.prototype._animate.call(a.anim, dt, a.speed, a.yawRate);
+      if (a.act) stepAct(a, dt);                                    // (Phase 6) a move: its own pose for this frame
+      else PlaceholderPlayer.prototype._animate.call(a.anim, dt, a.speed, a.yawRate);
     }
+    // (Phase 6) a move keeps its own clock even while the avatar is off screen (it ends on time; not drawn)
+    for (const a of list) if (a.act && !a.drawn) stepAct(a, dt);
     stats.total = list.length; stats.drawn = drawn; stats.reflected = refl; stats.animated = drawn;
   }
   const PUSH_KEYS = new Set(['w']);
-  return { add, remove, update, list, stats };
+
+  // ---- (Phase 6) moves of other players: the local player's own move code, run on the avatar's stand-in ----
+  // Where the skater IS (x / z) always comes from the network (it already includes the sender's travel during the move);
+  // the move only adds what the network does not carry: the pose, the height off the ice and the extra turns.
+  const ACT_MAX = { axel: 6, spin: 14, routine: 32 };                // s — safety stop if a move somehow never ends
+  const ACT_STEP = 1 / 60;                                           // longest step for one move update (frame hiccups)
+  function startAct(a, k, n, late = 0) {
+    stopAct(a);
+    const G = a.anim, h = a.heading;
+    G.heading = h;
+    G.velocity.set(Math.sin(h), 0, Math.cos(h)).multiplyScalar(a.speed);
+    const ok = k === 'axel' ? G.startTripleAxel(null) : k === 'spin' ? G.startSpin(null) : k === 'routine' ? G.startRoutine(null) : false;
+    if (!ok) return false;
+    a.act = { k, n, t: 0 };
+    if (late > 0) stepAct(a, late);                                   // (a few frames late: catch up to the right moment)
+    return true;
+  }
+  function stepAct(a, dt) {
+    const G = a.anim, A = a.act, p = a.root.position, x = p.x, z = p.z;
+    A.t += dt;
+    G.heading = a.heading;
+    for (let left = dt; left > 1e-6 && (G.trick || G.spin || G.routine); left -= ACT_STEP) {
+      const h = Math.min(ACT_STEP, left);
+      if (G.spin) G._applySpin(h);                                   // (same order as PlaceholderPlayer.update)
+      else {
+        G._animate(h, a.speed, a.yawRate);
+        if (G.routine) G.routine.step(h, a.speed);
+        if (G.trick) G._applyTrick(h);
+      }
+    }
+    p.x = x; p.z = z;                                                // position: always the network's
+    if (!(G.trick || G.spin || G.routine) || A.t > ACT_MAX[A.k]) stopAct(a);
+  }
+  // back to plain skating (end of a move, or a reset): the same clean-up the moves do themselves
+  function stopAct(a) {
+    const G = a.anim, R = a.rig;
+    if (!a.act && !G.trick && !G.spin && !G.routine) return;
+    G.trick = G.spin = G.routine = null; G.glideOut = false;
+    a.act = null;
+    a.root.position.y = world.bounds.iceY;
+    a.root.rotation.y = a.heading;
+    R.pelvis.quaternion.identity(); R.pelvis.position.x = R.pelvis.position.z = 0;
+    for (const arm of [R.armL, R.armR]) arm.shoulder.rotation.y = 0;
+  }
+  return { add, remove, update, list, stats, startAct, stopAct };
 })();
 
 // ===== net/remotePlayers.js =====
@@ -6743,7 +6813,8 @@ const remoteSkaters = (() => {
 // rate of the smoothed heading. Nothing here touches the own skater, the joystick or the camera.
 const remotePlayers = (() => {
   const DELAY = 220, MAX_EXTRAP = 250, SNAP = 8, KEEP = 12;
-  const peers = new Map();                       // id → { a, tag, buf: [samples], base, nick }
+  const LATE_MAX = 1000;                         // (Phase 6) ms: a move seen later than this is not shown (no mid-move start)
+  const peers = new Map();                       // id → { a, tag, buf: [samples], base, nick, acts: [queued moves], lastN }
   const wrap = (h) => Math.atan2(Math.sin(h), Math.cos(h));
   const sample = (m, t) => ({ t, x: m.x, z: m.z, h: m.h, v: m.v || 0, f: m.f || 0 });
   function upsert(m) {
@@ -6752,17 +6823,40 @@ const remotePlayers = (() => {
     if (!P) {
       const a = remoteSkaters.add({ id: m.id, style: m.style, color: m.color, x: m.x, z: m.z, heading: m.h });
       const tag = createNameTag({ rig: a.rig, mesh: a.root }, camera);
-      P = { a, tag, buf: [], base: null, h: m.h };
+      P = { a, tag, buf: [], base: null, h: m.h, acts: [], lastN: 0 };
       peers.set(m.id, P);
     }
     P.a.rig.knit.color.setHex(m.color);
     P.tag.set(m.nick);
     P.buf.length = 0; P.base = null;                               // fresh start at the given spot (no glide from old data)
     P.buf.push(sample(m, performance.now() - DELAY));
+    // (Phase 6) a move already running when we see this skater (we just entered / re-synced): shown only if it began
+    // under LATE_MAX ago — otherwise plain skating until the next move (never a move joined half-way)
+    P.acts.length = 0;
+    if (m.act && m.act.n > P.lastN) {
+      P.lastN = m.act.n;
+      if (m.act.age < LATE_MAX) P.acts.push({ k: m.act.k, n: m.act.n, at: performance.now() - DELAY - m.act.age });
+    }
+  }
+  // (Phase 6) a move started: played when the drawn (slightly delayed) timeline reaches its start, i.e. exactly where the
+  // position samples put the skater at that moment; duplicates / old numbers are ignored
+  function act(m) {
+    const P = peers.get(m.id);
+    if (!P || !(m.n > P.lastN)) return;
+    P.lastN = m.n;
+    move(m);                                                       // (its start position / heading is a sample too)
+    const last = P.buf[P.buf.length - 1];
+    P.acts.push({ k: m.k, n: m.n, at: last ? last.t : performance.now() - DELAY });
+  }
+  function actEnd(m) {
+    const P = peers.get(m.id);
+    if (!P) return;
+    for (let i = P.acts.length - 1; i >= 0; i--) if (P.acts[i].n === m.n) P.acts.splice(i, 1);   // never started: drop it
   }
   function move(m) {
     const P = peers.get(m.id);
     if (!P) return;
+    if (m.ts === undefined) return;
     const now = performance.now();
     // sender clock → own clock: the smallest (arrival − send time) seen is the least-delayed path; drifts up slowly
     const est = now - (m.ts || 0);
@@ -6816,13 +6910,18 @@ const remotePlayers = (() => {
       P.h = h;
       a.yawRate = dt > 0 ? THREE.MathUtils.clamp(dh / dt, -6, 6) : 0;
       a.root.position.x = x; a.root.position.z = z; a.root.rotation.y = h;
-      a.speed = v; a.pushing = (f & 1) === 1;
+      a.speed = v; a.pushing = (f & 1) === 1; a.heading = h;
+      // (Phase 6) due moves start now (a frame late at most — caught up inside); too late → skipped
+      while (P.acts.length && P.acts[0].at <= rt) {
+        const q = P.acts.shift(), late = rt - q.at;
+        if (late < LATE_MAX) remoteSkaters.startAct(a, q.k, q.n, late / 1000);
+      }
     }
   }
   function updateTags() {
     for (const P of peers.values()) { if (P.a.drawn) P.tag.update(); else P.tag.hide(); }
   }
-  return { upsert, move, remove, clear, reset, step, updateTags, get count() { return peers.size; } };
+  return { upsert, move, act, actEnd, remove, clear, reset, step, updateTags, get count() { return peers.size; } };
 })();
 
 // development-only measurement fixture: ?testremotes=N (1–8) adds N avatars skating loops around the tree.
@@ -6952,7 +7051,7 @@ routineBtn.addEventListener('click', () => {
   routineBtn.blur();
   if (routineBtn.disabled || proposal.active || player.trick || player.spin || player.routine || partner.mode === 'dance') return;
   partner.cancel();                     // Help / Hold Hands: let go first (the routine needs both arms)
-  if (player.startRoutine(() => setActionBusy(false))) setActionBusy(true);
+  if (player.startRoutine(() => { setActionBusy(false); RINK_LINK.actEnd(); })) { setActionBusy(true); RINK_LINK.act('routine'); }
 });
 
 // 스핀돌기 / 트리플악셀: the existing Spin and Triple Axel (unchanged)
@@ -6962,7 +7061,7 @@ spinBtn.style.cssText = ACTION_BTN_CSS;
 spinBtn.addEventListener('click', () => {
   if (spinBtn.disabled) return;
   partner.cancel();                     // Help / Hold Hands: let go first, then spin
-  if (player.startSpin(() => setActionBusy(false))) setActionBusy(true);
+  if (player.startSpin(() => { setActionBusy(false); RINK_LINK.actEnd(); })) { setActionBusy(true); RINK_LINK.act('spin'); }
   spinBtn.blur();
 });
 const axelBtn = document.createElement('button');
@@ -6971,8 +7070,8 @@ axelBtn.style.cssText = ACTION_BTN_CSS;
 axelBtn.addEventListener('click', () => {
   if (axelBtn.disabled) return;
   partner.cancel();                     // Help / Hold Hands: let go first, then jump
-  const started = player.startTripleAxel(() => setActionBusy(false));
-  if (started) setActionBusy(true);
+  const started = player.startTripleAxel(() => { setActionBusy(false); RINK_LINK.actEnd(); });
+  if (started) { setActionBusy(true); RINK_LINK.act('axel'); }      // (Phase 6) others see it too
   axelBtn.blur();
 });
 actionBar.append(routineBtn, spinBtn, axelBtn);
