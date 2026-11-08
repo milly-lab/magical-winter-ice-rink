@@ -24,6 +24,10 @@
 //     {t:"act", k, n, x, z, h, v, ts}                            (Phase 6) a move starts: k = "axel" | "spin" | "routine",
 //                                                                n = the sender's move number (always increasing)
 //     {t:"act-end", n}                                           (Phase 6) that move finished
+//     {t:"ireq", to, k}                                          (Phase 7) ask another skater for an interaction (k: "hold")
+//     {t:"ireq-cancel", rid}                                     (Phase 7) take the own request back
+//     {t:"ires", rid, ok}                                        (Phase 7) the asked skater accepts (true) / declines (false)
+//     {t:"ia-end", pid}                                          (Phase 7) let go (either of the two)
 //   server → client
 //     {t:"welcome", id, players, max}                            (Phase 1) connection accepted
 //     {t:"join-ok", id, players, max, peers:[P…]}                the players already skating (never yourself)
@@ -31,6 +35,12 @@
 //     {t:"mv", id, x, z, h, v, f, ts}                            someone moved
 //     {t:"act", id, k, n, x, z, h, v, ts}                        (Phase 6) someone started a move
 //     {t:"act-end", id, n}                                       (Phase 6) …and finished it
+//     {t:"ireq-ok", rid, to, k, ttl}                             (Phase 7) your request was delivered (expires in ttl ms)
+//     {t:"ireq-no", to, k, reason, rid?}                         (Phase 7) your request was refused / declined / expired
+//     {t:"ireq-in", rid, from, nick, k, ttl}                     (Phase 7) someone asks you (answer within ttl ms)
+//     {t:"ireq-gone", rid, reason}                               (Phase 7) that request no longer stands
+//     {t:"ia-start", pid, k, lead, follow}                       (Phase 7) two skaters started an interaction (to everyone)
+//     {t:"ia-end", pid, reason}                                  (Phase 7) …and it ended (to everyone)
 //     {t:"leave", id, players}                                   someone left / was disconnected
 //     {t:"count", players}                                       the number of connected players changed
 //   P = {id, nick, style, color, x, z, h, v, f, act?}   act = {k, n, age} (ms since it started) while a move is running
@@ -44,7 +54,12 @@
 // Phase 6 (2026-11-08): moves (Triple Axel, Spin, 안무 연습) are relayed as start / end events — the id always comes from
 // the connection (never from the message), a new move is refused while the previous one can still be running (each
 // move has a fixed length), move numbers must increase (no duplicates / replays), and only skaters in the rink get them.
-// NOT implemented yet: interaction requests (later phases).
+// Phase 7 (2026-11-08): interactions between two skaters, decided by the server only. One request per skater at a time
+// (10 s), only to a skater who is in the rink, near, not asking / asked / busy themselves; only the asked skater can
+// answer; an expired / answered / unknown request does nothing; two skaters asking each other = accepted. The request
+// and the pair live in the two connections' attachments (they survive hibernation). Leaving, a move (act) or a new
+// request of either one ends / clears what involved them. Kinds allowed now: "hold" (Hold Hands; help / dance /
+// confess will use the same path later). Interactions are not stored anywhere else.
 //
 // Nothing secret lives here: allowed origins and limits are plain settings in wrangler.jsonc ("vars").
 
@@ -71,6 +86,11 @@ const LIMIT_X = 70, LIMIT_Z = 37;       // a little outside the rink (66.6 × 33
 const SID_RE = /^[A-Za-z0-9_-]{16,64}$/;
 // Phase 6 — moves: a new move sooner than ~80% of the previous one's length is refused (the real lengths never trip it,
 // whatever the frame rate or network timing) and when the server stops reporting it as running
+// Phase 7 — interactions
+const IA_KINDS = ['hold'];               // (later: 'help', 'dance', 'confess')
+const REQ_TTL = 10000;                   // ms a request stands
+const REQ_GAP = 1500;                    // ms between two requests of the same skater (no popup spam)
+const IA_RANGE = 14;                     // m: the page opens the menu within 8 m; the server allows a little more (network delay)
 const ACTS = { axel: { min: 2000, max: 6000 }, spin: { min: 8800, max: 14000 }, routine: { min: 23000, max: 32000 } };   // (measured: 2.5 s · 11.0 s · 28.9 s)
 const BAD_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/;
 
@@ -104,6 +124,7 @@ function cleanProfile(m) {
   return { n: nick, s: m.style, c: m.color };
 }
 const actOf = (a, now) => (a.act && !a.act.done && now - a.act.at < ACTS[a.act.k].max ? { k: a.act.k, n: a.act.n, age: now - a.act.at } : undefined);
+const pairOf = (a) => (a.pair ? { pid: a.pair.pid, k: a.pair.k, lead: a.pair.lead, follow: a.pair.follow } : undefined);
 const peerOf = (a, now = Date.now()) => ({ id: a.id, nick: a.p.n, style: a.p.s, color: a.p.c, x: a.st[0], z: a.st[1], h: a.st[2], v: a.st[3], f: a.st[4], act: actOf(a, now) });
 
 // ---------- Worker: routes requests ----------
@@ -185,6 +206,7 @@ export class RinkRoom extends DurableObject {
     if (a.gone) return;
     a.gone = true;
     try { ws.serializeAttachment(a); } catch { /* closed */ }
+    if (a.joined && a.p) this._clearInteractions(ws, a, 'left');   // (Phase 7) requests / hand-holding end with them
     if (a.joined) {
       const rest = this._players(ws), n = rest.length;
       if (a.p) {                                               // skaters remove the avatar; players still choosing get the count
@@ -194,6 +216,49 @@ export class RinkRoom extends DurableObject {
     }
     if (code) { try { ws.close(code, reason); } catch { /* already closed */ } }
   }
+  // ---- (Phase 7) interactions ----
+  _byId(id, except = null) { return this._skaters(except).find((s) => (s.deserializeAttachment() || {}).id === id) || null; }
+  _put(ws, a) { try { ws.serializeAttachment(a); } catch { /* closed */ } }
+  _send(ws, obj) { try { ws.send(json(obj)); } catch { /* closing */ } }
+  // the open (not expired) request that someone made to `id`, if any
+  _incoming(id, now) {
+    for (const s of this._skaters()) { const b = s.deserializeAttachment(); if (b.req && b.req.to === id && b.req.exp > now) return [s, b]; }
+    return [null, null];
+  }
+  _free(a, now) { return !a.pair && !(a.req && a.req.exp > now) && !this._incoming(a.id, now)[0]; }
+  // drop the request `ws` made (if still open) and tell the asked skater
+  _clearReq(ws, a, reason) {
+    if (!a.req) return;
+    const r = a.req; a.req = null; this._put(ws, a);
+    const t = this._byId(r.to); if (t && r.exp > Date.now()) this._send(t, { t: 'ireq-gone', rid: r.rid, reason });
+  }
+  // end the pair `ws` is in (for both, and tell every skater)
+  _endPair(ws, a, reason) {
+    if (!a.pair) return;
+    const P = a.pair; a.pair = null; this._put(ws, a);
+    const other = this._byId(P.lead === a.id ? P.follow : P.lead);
+    if (other) { const b = other.deserializeAttachment(); if (b.pair && b.pair.pid === P.pid) { b.pair = null; this._put(other, b); } }
+    this._broadcast({ t: 'ia-end', pid: P.pid, reason }, null, this._skaters());   // (a leaving skater is already out of this list)
+  }
+  // everything this skater had running: its request, requests made to it, its pair
+  _clearInteractions(ws, a, reason) {
+    this._clearReq(ws, a, reason);
+    for (const s of this._skaters(ws)) {                          // requests made TO this skater: refused for the asker
+      const b = s.deserializeAttachment();
+      if (b.req && b.req.to === a.id) {
+        const r = b.req; b.req = null; this._put(s, b);
+        if (r.exp > Date.now()) this._send(s, { t: 'ireq-no', rid: r.rid, to: a.id, k: r.k, reason: reason === 'left' ? 'gone' : 'busy' });
+      }
+    }
+    this._endPair(ws, a, reason);
+  }
+  _startPair(leadWs, lead, followWs, follow, k) {
+    const P = { pid: crypto.randomUUID(), k, lead: lead.id, follow: follow.id, at: Date.now() };
+    lead.req = null; lead.pair = P; this._put(leadWs, lead);
+    follow.req = null; follow.pair = P; this._put(followWs, follow);
+    this._broadcast({ t: 'ia-start', pid: P.pid, k, lead: P.lead, follow: P.follow });
+  }
+
   async _ensureSweep() {
     if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + SWEEP_MS);
   }
@@ -286,6 +351,7 @@ export class RinkRoom extends DurableObject {
         || !(msg.ts === undefined || num(msg.ts, 0, 9007199254740991))) { await bad('bad-data'); return; }
       if (a.act && msg.n <= a.act.n) { await bad('dup-act'); return; }                       // duplicate / replayed
       if (a.act && !a.act.done && now - a.act.at < ACTS[a.act.k].min) { await bad('busy'); return; }   // still running
+      if (a.pair) this._endPair(ws, a, 'move');                // (Phase 7) a move needs both arms: the hand-hold ends first
       a.act = { k: msg.k, n: msg.n, at: now, done: false };
       a.st = st;
       ws.serializeAttachment(a);
@@ -304,6 +370,59 @@ export class RinkRoom extends DurableObject {
       await this._save();
       return;
     }
+    // ---- (Phase 7) interactions: request → answer → together → let go ----
+    if (msg.t === 'ireq' || msg.t === 'ireq-cancel' || msg.t === 'ires' || msg.t === 'ia-end') {
+      if (!a.p) { await bad('not-joined'); return; }
+      const no = (reason, extra = {}) => this._send(ws, { t: 'ireq-no', to: msg.to, k: msg.k, reason, ...extra });
+      if (msg.t === 'ireq') {
+        if (typeof msg.to !== 'string' || msg.to.length > 64 || typeof msg.k !== 'string') { await bad('bad-data'); return; }
+        if (!IA_KINDS.includes(msg.k)) no('kind');
+        else if (msg.to === a.id) no('self');
+        else if (now - (a.reqAt || 0) < REQ_GAP) no('wait');
+        else {
+          const t = this._byId(msg.to, ws);
+          const b = t && t.deserializeAttachment();
+          if (!t) no('gone');
+          else if (a.pair || (this._incoming(a.id, now)[0] && !(b.req && b.req.to === a.id))) no('busy-self');
+          else if (a.req && a.req.exp > now) no('pending');                               // one request at a time
+          else if (b.req && b.req.to === a.id && b.req.exp > now && b.req.k === msg.k && !b.pair) {
+            this._startPair(t, b, ws, a, msg.k);                                          // asked each other: together
+          } else if (!this._free(b, now)) no('busy');
+          else if (Math.hypot(a.st[0] - b.st[0], a.st[1] - b.st[1]) > IA_RANGE) no('far');
+          else {
+            a.req = { rid: crypto.randomUUID(), to: b.id, k: msg.k, exp: now + REQ_TTL };
+            a.reqAt = now;
+            this._put(ws, a);
+            this._send(ws, { t: 'ireq-ok', rid: a.req.rid, to: b.id, k: msg.k, ttl: REQ_TTL });
+            this._send(t, { t: 'ireq-in', rid: a.req.rid, from: a.id, nick: a.p.n, k: msg.k, ttl: REQ_TTL });
+          }
+        }
+      } else if (msg.t === 'ireq-cancel') {
+        if (a.req && a.req.rid === msg.rid) this._clearReq(ws, a, 'cancelled');           // (unknown / old: nothing to do)
+      } else if (msg.t === 'ires') {
+        if (typeof msg.rid !== 'string' || typeof msg.ok !== 'boolean') { await bad('bad-data'); return; }
+        // the request must be addressed to THIS connection (nobody can answer for someone else)
+        const from = this._skaters(ws).find((s) => { const b = s.deserializeAttachment(); return b.req && b.req.rid === msg.rid && b.req.to === a.id; });
+        const b = from && from.deserializeAttachment();
+        if (!from) this._send(ws, { t: 'ireq-gone', rid: msg.rid, reason: 'unknown' });
+        else if (b.req.exp <= now) {
+          b.req = null; this._put(from, b);
+          this._send(ws, { t: 'ireq-gone', rid: msg.rid, reason: 'expired' });
+          this._send(from, { t: 'ireq-no', rid: msg.rid, to: a.id, k: 'hold', reason: 'expired' });
+        } else if (!msg.ok) {
+          const k = b.req.k; b.req = null; this._put(from, b);
+          this._send(from, { t: 'ireq-no', rid: msg.rid, to: a.id, k, reason: 'declined' });
+        } else if (a.pair || b.pair || (a.req && a.req.exp > now)) {
+          const k = b.req.k; b.req = null; this._put(from, b);
+          this._send(ws, { t: 'ireq-gone', rid: msg.rid, reason: 'busy' });
+          this._send(from, { t: 'ireq-no', rid: msg.rid, to: a.id, k, reason: 'busy' });
+        } else this._startPair(from, b, ws, a, b.req.k);                                  // accepted: the asker leads
+      } else if (msg.t === 'ia-end') {
+        if (a.pair && a.pair.pid === msg.pid) this._endPair(ws, a, 'released');           // (old / unknown pid: nothing)
+      }
+      await this._save();
+      return;
+    }
     if (msg.t === 'join') {                                    // (Phase 5) enter the rink (sent again after a reconnect / resync)
       const p = cleanProfile(msg), st = cleanState(msg, false);
       if (!p || !st) { await bad('bad-data'); return; }
@@ -311,7 +430,8 @@ export class RinkRoom extends DurableObject {
       ws.serializeAttachment(a);
       const others = this._skaters(ws);
       ws.send(json({ t: 'join-ok', id: a.id, players: this._players().length, max: this.maxPlayers,
-        peers: others.map((s) => peerOf(s.deserializeAttachment())) }));
+        peers: others.map((s) => peerOf(s.deserializeAttachment())),
+        pairs: [...new Map(this._skaters().map((s) => pairOf(s.deserializeAttachment())).filter(Boolean).map((P) => [P.pid, P])).values()] }));
       this._broadcast({ t: 'peer', ...peerOf(a) }, ws, others);
       await this._save();
       return;

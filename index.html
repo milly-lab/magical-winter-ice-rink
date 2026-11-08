@@ -6099,6 +6099,7 @@ function createNameTag(player, camera) {
   return {
     set(t) { text = t || ''; el.textContent = text; },
     hide() { el.style.display = 'none'; },                              // (Phase 5) other players' tags
+    get text() { return text; },                                        // (Phase 7)
     remove() { el.remove(); },
     update() {
       if (!text) { el.style.display = 'none'; return; }
@@ -6391,11 +6392,12 @@ const RINK_LINK = (() => {
       } else if (m.t === 'refused') refused = m.reason;
       else if (m.t === 'hello-ok') { L.players = m.players; hud(); }
       // (Phase 5) other players
-      else if (m.t === 'join-ok') { L.joined = true; L.players = m.players; hud(); remotePlayers.reset(m.peers); L.sendNow = true; }
+      else if (m.t === 'join-ok') { L.joined = true; L.players = m.players; hud(); remotePlayers.reset(m.peers); interactions.reset(m.pairs); L.sendNow = true; }
       else if (m.t === 'peer') { if (L.joined) { remotePlayers.upsert(m); L.sendNow = true; } }   // (newcomer: send them our state)
       else if (m.t === 'mv') { if (L.joined) remotePlayers.move(m); }
       else if (m.t === 'act') { if (L.joined) remotePlayers.act(m); }          // (Phase 6) moves
       else if (m.t === 'act-end') { if (L.joined) remotePlayers.actEnd(m); }
+      else if (/^(ireq|ia-)/.test(m.t)) { if (L.joined) interactions.onMessage(m); }   // (Phase 7) requests · hand-holds
       else if (m.t === 'leave') { remotePlayers.remove(m.id); L.players = m.players; hud(); }
       else if (m.t === 'count') { L.players = m.players; hud(); }
       else if (m.t === 'notice' && m.reason === 'daily-limit-soon') { /* players already inside keep playing */ }
@@ -6498,10 +6500,11 @@ const RINK_LINK = (() => {
     const s = selfState();
     send({ t: 'join', nick: P.nickname, style: P.style, color: P.color, x: s.x, z: s.z, h: s.h });
   }
-  function leftRink() { L.joined = false; remotePlayers.clear(); }
+  function leftRink() { L.joined = false; interactions.clear(); remotePlayers.clear(); }
   // once per frame: own movement (only while it changes, and only if someone else is there to see it)
   function tick() {
     if (!L.joined || !remotePlayers.count || !L.ws || L.ws.readyState !== 1) return;
+    if (interactions.following()) return;                // (Phase 7) holding hands as the follower: the leader carries the position for both
     const now = performance.now(), S = L.sent;
     if (now - S.t < SEND_EVERY) return;
     const s = selfState();
@@ -6562,6 +6565,8 @@ const RINK_LINK = (() => {
     start() { connect(); },
     profileReady() { sendJoin(); },                                   // (Phase 5) setup screen done
     tick, act, actEnd,                                                // (Phase 6) own moves
+    send,                                                             // (Phase 7) interaction messages
+    resend() { L.sendNow = true; L.sent.t = -Infinity; },             // (Phase 7) send the own position at the next frame
     get joined() { return L.joined; },
     get mode() { return L.mode; },
     get id() { return L.id; },
@@ -6687,6 +6692,7 @@ const remoteSkaters = (() => {
   const none = new Set();
   const meshesOf = (root) => { const out = []; root.traverse((o) => { if (o.isMesh) out.push(o); }); return out; };
   const stats = { total: 0, drawn: 0, reflected: 0, animated: 0 };
+  const PICK_GEO = new THREE.CylinderGeometry(0.45, 0.45, 1.95, 12), PICK_MAT = new THREE.MeshBasicMaterial();   // (Phase 7)
 
   function add({ id, style = 'skater', color = TOP_COLORS[0].hex, x = 0, z = 0, heading = 0 } = {}) {
     const rig = buildSkater({ style, detail: REMOTE.detail, shared });
@@ -6703,6 +6709,10 @@ const remoteSkaters = (() => {
     rig.root.rotation.y = heading;
     rig.root.name = 'Remote:' + id;
     addSoftFill(rig.root, LIGHTING.characterFill, fill);           // same character lighting as the player
+    // (Phase 7) invisible tap volume (same as the test character's), so this skater can be tapped for the menu
+    const pick = new THREE.Mesh(PICK_GEO, PICK_MAT);
+    pick.position.y = 0.97; pick.visible = false;
+    rig.root.add(pick);
     scene.add(rig.root);
     // (Phase 6) `anim` is a small stand-in for a PlaceholderPlayer, so the SAME skating / move code of the local player
     // (_animate, Triple Axel, Spin, Choreography) can play on this avatar — nothing of the moves is re-written here
@@ -6715,6 +6725,7 @@ const remoteSkaters = (() => {
       id, style, rig, meshes, root: rig.root, anim,
       speed: 0, yawRate: 0, pushing: false, reflected: true, drawn: true, heading,
       act: null,                      // (Phase 6) the move being shown: { k, n, t }
+      pick, vx: 0, vz: 0,             // (Phase 7) tap volume · shown velocity (for a partner following this skater)
     };
     list.push(a);
     return a;
@@ -6906,9 +6917,11 @@ const remotePlayers = (() => {
         }
       }
       // turn rate from the smoothed heading (for the body lean), and the skating animation inputs
+      if (P.held) continue;                                          // (Phase 7) holding hands as the follower: placed by the pair
       const dh = wrap(h - P.h);
       P.h = h;
       a.yawRate = dt > 0 ? THREE.MathUtils.clamp(dh / dt, -6, 6) : 0;
+      if (dt > 0) { a.vx = (x - a.root.position.x) / dt; a.vz = (z - a.root.position.z) / dt; }   // (Phase 7) shown velocity
       a.root.position.x = x; a.root.position.z = z; a.root.rotation.y = h;
       a.speed = v; a.pushing = (f & 1) === 1; a.heading = h;
       // (Phase 6) due moves start now (a frame late at most — caught up inside); too late → skipped
@@ -6921,7 +6934,22 @@ const remotePlayers = (() => {
   function updateTags() {
     for (const P of peers.values()) { if (P.a.drawn) P.tag.update(); else P.tag.hide(); }
   }
-  return { upsert, move, act, actEnd, remove, clear, reset, step, updateTags, get count() { return peers.size; } };
+  // (Phase 7) the hand-hold places a follower itself; when it lets go, the network takes over again from where it is shown
+  function hold(id, on) {
+    const P = peers.get(id);
+    if (!P || P.held === on) return;
+    P.held = on;
+    if (!on) {
+      const p = P.a.root.position;
+      P.buf.length = 0; P.base = null; P.h = P.a.heading;
+      P.buf.push(sample({ x: p.x, z: p.z, h: P.a.heading, v: P.a.speed, f: 0 }, performance.now() - DELAY));
+    }
+  }
+  const avatar = (id) => { const P = peers.get(id); return P ? P.a : null; };
+  const nick = (id) => { const P = peers.get(id); return P ? P.tag.text || '' : ''; };
+  const idOf = (a) => { for (const [id, P] of peers) if (P.a === a) return id; return null; };
+  return { upsert, move, act, actEnd, remove, clear, reset, step, updateTags, hold, avatar, nick, idOf, list: () => [...peers.values()].map((P) => P.a),
+    get count() { return peers.size; } };
 })();
 
 // development-only measurement fixture: ?testremotes=N (1–8) adds N avatars skating loops around the tree.
@@ -7008,12 +7036,382 @@ askBtn.addEventListener('click', (e) => {
 });
 partner.menu.appendChild(askBtn);
 updateAskOut();
+
+// ===== net/interactions.js =====
+// (2026-11-08, Phase 7) interactions between REAL players: tap another skater → the same radial menu as the test
+// character (도와주기 · 손잡기 · 춤추기 · 고백하기) → a request → the other player accepts / declines → together → let go.
+// The server decides every step (see server/src/index.js); this only shows it. Only 손잡기 (Hold Hands) is enabled for
+// real players so far — the other three items are shown but locked (they use this same path later).
+// Hold Hands reuses the test character's partner code: the same slot (she / the follower on the leader's right,
+// PS.holdGap), the same follow-with-a-little-give, the same shared clasp point and two-bone arm IK (psClasp / psArmIK).
+// The one who asked LEADS (skates as usual); the one who accepted FOLLOWS (own input paused, follows the leader).
+// On every screen the follower is placed next to the leader as that screen shows the leader — so their hands never
+// drift apart through network delay — and the follower sends no movement while holding (the leader's is enough).
+const interactions = (() => {
+  const KIND_LABEL = { hold: '손잡기' };
+  const START_R = 2.2;                 // m: the follower joins the leader's side once the leader is this close
+  const APPROACH_MAX = 15;             // s: the leader did not come over → the hold is called off
+  const OUT_TIME = 0.4;                // s: hands ease apart after letting go
+  const pairs = new Map();             // pid → pair (own and other players')
+  let out = null;                      // own open request: { rid, to, k, timer }
+  let inc = null;                      // request to me: { rid, from, nick, k, timer }
+  let target = null;                   // avatar whose menu is open
+  const _v = new THREE.Vector3(), _w = new THREE.Vector3(), _slot = new THREE.Vector3(), _hm = new THREE.Vector3();
+  const toast = (t, sec = 3) => STORY_UI.toast(t, sec);
+  const myId = () => RINK_LINK.id;
+  const send = (o) => RINK_LINK.send(o);
+  const localBusy = () => player.trick || player.spin || player.routine || proposal.active || partner.mode;
+  const nickOf = (id) => remotePlayers.nick(id) || '상대';
+
+  // ---------- UI: the radial menu (PartnerSkating's own layout code, aimed at the tapped skater) ----------
+  const menu = Object.create(PartnerSkating.prototype);
+  Object.assign(menu, { player, camera, dom: renderer.domElement, R: null, menuOpen: false, radialItemStyle: partner.radialItemStyle });
+  menu.menu = document.createElement('div');
+  menu.menu.style.cssText = partner.menu.style.cssText;
+  menu.menu.style.display = 'none';
+  for (const [label, k] of [['도와주기', 'help'], ['손잡기', 'hold'], ['춤추기', 'dance'], ['고백하기', 'confess']]) {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.cssText = partner.radialItemStyle;
+    b.className = 'tap-pill radial-pill radial-item';
+    b.setAttribute('aria-disabled', k === 'hold' ? 'false' : 'true');            // only Hold Hands for real players so far
+    b.addEventListener('pointerdown', (e) => e.stopPropagation());
+    b.addEventListener('click', (e) => {
+      e.stopPropagation(); b.blur();
+      if (k !== 'hold') { toast('아직 준비 중인 기능이에요.'); return; }
+      const id = target && remotePlayers.idOf(target);
+      menu.closeMenu();
+      if (id) request(id, k);
+    });
+    menu.menu.appendChild(b);
+  }
+  document.body.appendChild(menu.menu);
+
+  // bottom pill: 요청 취소 (while asking) / 손 놓기 (while holding) — same pill as the test character's 손 놓기
+  const pill = document.createElement('button');
+  pill.style.cssText = partner.letGo.style.cssText;
+  pill.className = 'tap-pill radial-pill';
+  pill.style.display = 'none';
+  pill.addEventListener('click', () => { pill.blur(); if (own()) release(); else if (out) cancel(); });
+  document.body.appendChild(pill);
+  const showPill = () => {
+    const p = own();
+    pill.textContent = p ? '손 놓기' : '요청 취소';
+    pill.style.display = (p && !p.ending) || out ? 'block' : 'none';
+  };
+
+  // request popup: "(A)님이 손잡기를 요청하였습니다." · 수락 / 거절
+  const pop = document.createElement('div');
+  pop.style.cssText = 'position:fixed;left:50%;bottom:calc(212px + env(safe-area-inset-bottom));transform:translateX(-50%);z-index:12;'
+    + 'display:none;padding:16px 18px 14px;border-radius:18px;border:1px solid rgba(243,217,184,.45);background:rgba(6,12,26,.72);'
+    + `backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);color:#f3d9b8;font:300 14px/1.45 ${HUD_FONT};letter-spacing:0;`
+    + 'text-align:center;max-width:calc(100vw - 32px);box-sizing:border-box';
+  const popText = document.createElement('div');
+  popText.style.cssText = 'margin-bottom:12px;word-break:keep-all';
+  const popRow = document.createElement('div');
+  popRow.style.cssText = 'display:flex;gap:10px;justify-content:center';
+  const mkBtn = (label, ok) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.cssText = partner.pillStyle + ';min-width:84px';
+    b.className = 'tap-pill radial-pill';
+    b.addEventListener('pointerdown', (e) => e.stopPropagation());
+    b.addEventListener('click', (e) => { e.stopPropagation(); b.blur(); answer(ok); });
+    return b;
+  };
+  popRow.append(mkBtn('수락', true), mkBtn('거절', false));
+  pop.append(popText, popRow);
+  document.body.appendChild(pop);
+  const closePop = () => { if (inc) clearTimeout(inc.timer); inc = null; pop.style.display = 'none'; };
+
+  // ---------- requests ----------
+  function request(to, k) {
+    if (!RINK_LINK.joined) return;
+    if (localBusy() || own()) { toast('지금은 손잡기를 요청할 수 없어요.'); return; }
+    if (out) { toast('이미 보낸 요청이 있어요.'); return; }
+    send({ t: 'ireq', to, k });
+  }
+  function cancel() {
+    if (!out) return;
+    send({ t: 'ireq-cancel', rid: out.rid });
+    clearTimeout(out.timer); out = null; showPill();
+  }
+  function answer(ok) {
+    if (!inc) return;
+    if (ok && localBusy()) { toast('동작이 끝난 뒤에 수락할 수 있어요.'); return; }
+    send({ t: 'ires', rid: inc.rid, ok });
+    closePop();
+  }
+  function release() {
+    const p = own();
+    if (!p || p.ending) return;
+    send({ t: 'ia-end', pid: p.pid });
+    finish({ pid: p.pid, reason: 'released' });                     // (own screen at once; the server's echo is then ignored)
+  }
+  // a move (Spin, Triple Axel, 안무 연습) needs both arms: let go / take the request back first
+  function beforeMove() { release(); cancel(); }
+
+  // ---------- pairs ----------
+  const own = () => { for (const P of pairs.values()) if (!P.ending && (P.lead === myId() || P.follow === myId())) return P; return null; };
+  const isFollower = () => { const P = own(); return !!P && P.follow === myId(); };
+  function begin(m) {
+    if (pairs.has(m.pid)) return;
+    const P = { pid: m.pid, k: m.k, lead: m.lead, follow: m.follow, active: false, locked: false, ending: false,
+      wJoin: 0, wRel: 0, wOut: 1, t: 0, vel: new THREE.Vector3(), heading: 0, yaw: 0 };
+    pairs.set(m.pid, P);
+    if (P.follow === myId()) { P.heading = player.heading; P.vel.copy(player.velocity); player.target = null; }
+    if (P.lead === myId()) {
+      // the asker skates over (tap-to-move steering, as with the test character): the follower ends on the leader's right
+      const B = remotePlayers.avatar(P.follow);
+      if (B && !localBusy()) {
+        const m0 = player.mesh.position, b = B.root.position;
+        let dx = b.x - m0.x, dz = b.z - m0.z; const d = Math.hypot(dx, dz) || 1; dx /= d; dz /= d;
+        const h = Math.atan2(dx, dz), q = new THREE.Vector3(b.x + PS.holdGap * Math.cos(h), 0, b.z - PS.holdGap * Math.sin(h));
+        partner._clampIce.call(partner, q);
+        if (Math.hypot(q.x - m0.x, q.z - m0.z) > 0.5) { player.target = new THREE.Vector2(q.x, q.z); player._best = Infinity; player._stuck = 0; player.glideOut = false; }
+      }
+    }
+    showPill();
+  }
+  function finish(m) {
+    const P = pairs.get(m.pid);
+    if (!P || P.ending) return;
+    P.ending = true; P.t = 0;
+    const mine = P.lead === myId() || P.follow === myId();
+    if (P.follow !== myId()) remotePlayers.hold(P.follow, false);                      // the network places them again
+    else RINK_LINK.resend();                                                          // (others need my real spot now)
+    if (mine) {
+      const other = P.lead === myId() ? P.follow : P.lead;
+      toast(m.reason === 'left' ? `${nickOf(other)}님의 연결이 끊어져 손을 놓았어요.` : '손을 놓았어요.');
+    }
+    showPill();
+  }
+  // the leader as THIS screen shows them: { p, h, vx, vz, phase, push }
+  const L0 = { p: null, h: 0, vx: 0, vz: 0, phase: 0, push: false };
+  function leaderOf(P) {
+    if (P.lead === myId()) {
+      L0.p = player.mesh.position; L0.h = player.heading; L0.vx = player.velocity.x; L0.vz = player.velocity.z; L0.phase = player.phase;
+      L0.push = player.keys.size > 0 || !!(player.stick && player.stick.m > 0) || player.target !== null;
+      return L0;
+    }
+    const a = remotePlayers.avatar(P.lead);
+    if (!a) return null;
+    L0.p = a.root.position; L0.h = a.heading; L0.vx = a.vx; L0.vz = a.vz; L0.phase = a.anim.phase; L0.push = a.pushing;
+    return L0;
+  }
+  function clampFollower(p) {
+    const B = world.bounds, out = B.dist(p.x, p.z) + 0.35;
+    if (out > 0) { const n = B.normal(p.x, p.z); p.x -= n.x * out; p.z -= n.z * out; }
+    const r = Math.hypot(p.x, p.z), m = B.islandRadius + 0.35;
+    if (r < m) { const k = m / Math.max(r, 1e-3); p.x *= k; p.z *= k; }
+  }
+  // the follower skates into the slot beside the leader, then stays locked to it with a little give
+  // (PartnerSkating._chase, with the leader / follower as parameters instead of the test character)
+  function chase(P, L, p, dt) {
+    const v = P.vel, ox = p.x, oz = p.z;
+    psAt(L.p, L.h, -PS.holdGap, 0, 0, _slot);
+    let dx = _slot.x - p.x, dz = _slot.z - p.z, dist = Math.hypot(dx, dz);
+    if (!P.locked) {
+      const sp = Math.min(9, Math.sqrt(2 * 6 * dist));
+      const tvx = L.vx + (dist > 1e-4 ? (dx / dist) * sp : 0), tvz = L.vz + (dist > 1e-4 ? (dz / dist) * sp : 0);
+      const k = 1 - Math.exp(-dt * 4);
+      v.x += (tvx - v.x) * k; v.z += (tvz - v.z) * k;
+      p.x += v.x * dt; p.z += v.z * dt;
+      if (Math.hypot(_slot.x - p.x, _slot.z - p.z) < 0.12) P.locked = true;
+    } else {
+      const k = 1 - Math.exp(-dt * 14);
+      p.x += dx * k; p.z += dz * k;
+      dx = p.x - _slot.x; dz = p.z - _slot.z; dist = Math.hypot(dx, dz);
+      if (dist > 0.08) { p.x = _slot.x + (dx / dist) * 0.08; p.z = _slot.z + (dz / dist) * 0.08; }
+    }
+    // keep apart from the leader, stay on the ice (PartnerSkating._keepApart / _clampIce). Along the boards / the island
+    // the follower may come closer to them than the leader (0.35 m instead of 0.8 m), so the leader skating along the
+    // edge does not squeeze the follower into them; the gap to the leader is applied once more after that.
+    for (let i = 0; i < 2; i++) {
+      const ddx = p.x - L.p.x, ddz = p.z - L.p.z, dd = Math.hypot(ddx, ddz);
+      if (dd < PS.minGap && dd > 1e-4) { p.x = L.p.x + (ddx * PS.minGap) / dd; p.z = L.p.z + (ddz * PS.minGap) / dd; }
+      clampFollower(p);
+    }
+    if (dt > 0) v.set((p.x - ox) / dt, 0, (p.z - oz) / dt);
+    const d2 = Math.hypot(_slot.x - p.x, _slot.z - p.z);
+    P.wJoin = Math.min(1, Math.max(0, P.wJoin + (d2 < 0.5 ? dt : -dt) * 2.5));
+    const spd = Math.hypot(v.x, v.z);
+    const travelH = spd > 0.5 ? Math.atan2(v.x - L.vx * P.wJoin, v.z - L.vz * P.wJoin) : P.heading;
+    const tgt = P.locked || spd < 0.5 ? L.h : psLerpA(travelH, L.h, psSm(0, 1, P.wJoin));
+    const prev = P.heading;
+    P.heading = psLerpA(P.heading, tgt, 1 - Math.exp(-dt * 8));
+    P.yaw = dt > 0 ? psWrap(P.heading - prev) / dt : 0;
+    P.wRel = Math.min(1, P.wRel + dt * 3);
+    return spd;
+  }
+  // own skater as the follower: called instead of player.update (fixed steps); input is paused
+  const _keys = new Set(['partner']), _none = new Set();
+  function stepLocalFollower(dt) {
+    const P = own();
+    if (!P || P.follow !== myId()) return false;
+    const L = leaderOf(P), p = player.mesh.position;
+    let spd;
+    if (!L) return false;
+    if (!P.active && Math.hypot(L.p.x - p.x, L.p.z - p.z) < START_R) P.active = true;
+    if (P.active) spd = chase(P, L, p, dt);
+    else {                                                              // waiting for the leader: glide to rest
+      P.vel.multiplyScalar(Math.exp(-2.5 * dt)); p.addScaledVector(P.vel, dt); partner._clampIce.call(partner, p);
+      spd = P.vel.length(); P.yaw = 0;
+    }
+    player.velocity.copy(P.vel); player.heading = P.heading; player.mesh.rotation.y = P.heading;
+    if (P.locked) player.phase = L.phase;                               // strokes in time with the leader
+    const keys = player.keys, stick = player.stick;
+    player.keys = P.locked && L.push ? _keys : _none; player.stick = null; player.target = null;
+    player._animate(dt, spd, P.yaw);
+    player.keys = keys; player.stick = stick;
+    return true;
+  }
+  // once per frame, after the network positions: other players' followers + the open menu
+  function update(dt) {
+    menu._placeMenu();
+    if (menu.menuOpen && (!target || !remotePlayers.idOf(target))) menu.closeMenu();
+    for (const P of pairs.values()) {
+      if (P.ending) { P.t += dt; P.wOut = Math.max(0, 1 - P.t / OUT_TIME); if (P.t >= OUT_TIME) pairs.delete(P.pid); continue; }
+      P.t += dt;
+      if (P.lead === myId() && !P.active && P.t > APPROACH_MAX) { release(); continue; }   // never came over
+      if (P.follow === myId()) {                                         // (own follower: moved in stepLocalFollower) —
+        if (P.active && P.locked) {                                      // the leader just moved for this frame: stay in step
+          const L = leaderOf(P), p = player.mesh.position;               // (same give as the locked hold: ≤ 8 cm off the slot)
+          if (L) {
+            psAt(L.p, L.h, -PS.holdGap, 0, 0, _slot);
+            const dx = p.x - _slot.x, dz = p.z - _slot.z, d = Math.hypot(dx, dz);
+            if (d > 0.08) { p.x = _slot.x + (dx / d) * 0.08; p.z = _slot.z + (dz / d) * 0.08; }
+            for (let i = 0; i < 2; i++) {
+              const ddx = p.x - L.p.x, ddz = p.z - L.p.z, dd = Math.hypot(ddx, ddz);
+              if (dd < PS.minGap && dd > 1e-4) { p.x = L.p.x + (ddx * PS.minGap) / dd; p.z = L.p.z + (ddz * PS.minGap) / dd; }
+              clampFollower(p);
+            }
+          }
+        }
+        continue;
+      }
+      const a = remotePlayers.avatar(P.follow), L = leaderOf(P);
+      if (!a || !L) continue;
+      const p = a.root.position;
+      if (!P.active) {
+        if (Math.hypot(L.p.x - p.x, L.p.z - p.z) >= START_R) continue;   // (still placed by the network)
+        P.active = true; P.heading = a.heading; P.vel.set(a.vx, 0, a.vz);
+        remotePlayers.hold(P.follow, true);
+      }
+      const spd = chase(P, L, p, dt);
+      a.root.rotation.y = P.heading; a.heading = P.heading;
+      a.speed = spd; a.yawRate = P.yaw; a.pushing = P.locked && L.push;
+      if (P.locked) a.anim.phase = L.phase;
+    }
+    if (out || own()) showPill();
+  }
+  // after every skater is posed: the two holding arms meet (his right ↔ her left), PartnerSkating._hands('hold')
+  function hands() {
+    for (const P of pairs.values()) {
+      if (!P.active) continue;
+      const w = psSm(0, 1, P.wJoin) * psSm(0, 1, P.wRel) * P.wOut;
+      if (!(w > 0.001)) continue;
+      const lead = P.lead === myId() ? player : remotePlayers.avatar(P.lead);
+      const fol = P.follow === myId() ? player : remotePlayers.avatar(P.follow);
+      if (!lead || !fol) continue;
+      const lr = lead === player ? player.rig : lead.rig, fr = fol === player ? player.rig : fol.rig;
+      if ((lead !== player && !lead.drawn) || (fol !== player && !fol.drawn)) continue;   // (off screen: nothing to show)
+      lr.root.updateMatrixWorld(true); fr.root.updateMatrixWorld(true);
+      const Sm = psShoulder(lr.armR, _v), Sf = psShoulder(fr.armL, _w);
+      const mp = lr.root.position, mh = lr.root.rotation.y;
+      const y = (Sm.y + Sf.y) / 2 - mp.y - 0.34;
+      const Pt = psAt(mp, mh, -PS.holdGap / 2, y, 0.1, _hm);
+      const [hm, hf] = psClasp(Pt, Sm, psReach(lr), Sf, psReach(fr));
+      psArmIK(lr, lr.armR, -1, hm, w, PS_POLE_IN);
+      psArmIK(fr, fr.armL, 1, hf, w, PS_POLE_IN);
+    }
+  }
+
+  // ---------- server messages ----------
+  function onMessage(m) {
+    switch (m.t) {
+      case 'ireq-ok':
+        if (out) clearTimeout(out.timer);
+        out = { rid: m.rid, to: m.to, k: m.k, timer: setTimeout(() => { out = null; showPill(); toast(`${nickOf(m.to)}님은 지금 ${KIND_LABEL[m.k] || ''}를 할 수 없어요.`); }, m.ttl) };
+        toast(`${nickOf(m.to)}님에게 ${KIND_LABEL[m.k] || ''}를 요청했어요.`);
+        showPill();
+        break;
+      case 'ireq-no': {
+        if (out && m.rid && out.rid !== m.rid) break;                   // (an older request)
+        if (out) clearTimeout(out.timer);
+        out = null; showPill();
+        const who = nickOf(m.to), what = KIND_LABEL[m.k] || '손잡기';
+        if (m.reason === 'pending') toast('이미 보낸 요청이 있어요.');
+        else if (m.reason === 'busy-self' || m.reason === 'wait') toast(`지금은 ${what}를 요청할 수 없어요.`);
+        else if (m.reason === 'far') toast(`${who}님에게 조금 더 가까이 가 주세요.`);
+        else toast(`${who}님은 지금 ${what}를 할 수 없어요.`);
+        break;
+      }
+      case 'ireq-in':
+        if (inc) clearTimeout(inc.timer);
+        inc = { rid: m.rid, from: m.from, nick: m.nick, k: m.k, timer: setTimeout(() => { closePop(); toast(`${m.nick}님의 요청이 만료되었어요.`); }, m.ttl) };
+        popText.textContent = `${m.nick}님이 ${KIND_LABEL[m.k] || ''}를 요청하였습니다.`;
+        pop.style.display = 'block';
+        break;
+      case 'ireq-gone':
+        if (inc && inc.rid === m.rid) {
+          const who = inc.nick; closePop();
+          if (m.reason === 'cancelled') toast(`${who}님이 요청을 취소했어요.`);
+          else if (m.reason === 'expired') toast(`${who}님의 요청이 만료되었어요.`);
+          else if (m.reason === 'left') toast(`${who}님의 연결이 끊어졌어요.`);
+        }
+        if (out && out.rid === m.rid) { clearTimeout(out.timer); out = null; showPill(); }
+        break;
+      case 'ia-start':
+        if (out && (m.lead === myId() || m.follow === myId())) { clearTimeout(out.timer); out = null; }
+        if (inc && (m.lead === myId() || m.follow === myId())) closePop();
+        begin(m);
+        if (m.lead === myId()) toast(`${nickOf(m.follow)}님이 손잡기를 수락했어요.`);
+        break;
+      case 'ia-end': finish(m); break;
+    }
+  }
+  // (re)entering the rink: the pairs right now, from the server
+  function reset(list) {
+    clear();
+    for (const m of list || []) begin(m);
+  }
+  function clear() {
+    for (const P of pairs.values()) if (P.follow !== myId()) remotePlayers.hold(P.follow, false);
+    pairs.clear();
+    if (out) clearTimeout(out.timer);
+    out = null; closePop(); showPill(); menu.closeMenu();
+  }
+  // a tap on the canvas: true = used here (menu / follower), false = normal tap-to-move
+  function handleTap(ray) {
+    if (menu.menuOpen) { menu.closeMenu(); return true; }
+    if (isFollower()) return true;                                       // (following: no tap-to-move)
+    if (!RINK_LINK.joined || localBusy()) return false;
+    let best = null, bd = Infinity;
+    for (const a of remotePlayers.list()) {
+      const hit = ray.intersectObject(a.pick, false)[0];
+      if (hit && hit.distance < bd) { bd = hit.distance; best = a; }
+    }
+    if (!best) return false;
+    const p = player.mesh.position, b = best.root.position;
+    if (Math.hypot(p.x - b.x, p.z - b.z) > PS_MENU_RANGE) return false;  // far: a normal tap-to-move toward them
+    if (target !== best) { target = best; menu.R = best.rig; menu._headLocal = null; }
+    menu.openMenu();
+    return true;
+  }
+  const following = () => { const P = own(); return !!P && P.follow === myId() && P.active; };
+  return { onMessage, reset, clear, update, hands, stepLocalFollower, handleTap, beforeMove, release, isFollower, following,
+    get pairs() { return pairs; }, get pending() { return out; }, get incoming() { return inc; }, accept: () => answer(true), decline: () => answer(false) };
+})();
+
 // taps: proposal (blocks everything) → open menus close → roses → her menu
 controls.onTap = (ray) => {
   if (proposal.active) return true;
   if (partner.menuOpen || partner.mode === 'dance') return partner.handleTap(ray);
+  if (interactions.isFollower()) return true;                         // (Phase 7) holding hands as the follower: no tap-to-move
   if (roseCollector.handleTap(ray)) return true;
-  return TEST_NPC ? partner.handleTap(ray) : false;                 // (the hidden test character cannot be tapped)
+  if (TEST_NPC && partner.handleTap(ray)) return true;               // (the hidden test character cannot be tapped)
+  return interactions.handleTap(ray);                                // (Phase 7) tap another real skater → their menu
 };
 
 // ---- bottom action bar (2026-11-03): 안무 연습 · 스핀돌기 · 트리플악셀 (2026-11-05: 축하하기 → 안무 연습) ---------------
@@ -7051,6 +7449,7 @@ routineBtn.addEventListener('click', () => {
   routineBtn.blur();
   if (routineBtn.disabled || proposal.active || player.trick || player.spin || player.routine || partner.mode === 'dance') return;
   partner.cancel();                     // Help / Hold Hands: let go first (the routine needs both arms)
+  interactions.beforeMove();            // (Phase 7) real hand-hold: let go / take a request back first
   if (player.startRoutine(() => { setActionBusy(false); RINK_LINK.actEnd(); })) { setActionBusy(true); RINK_LINK.act('routine'); }
 });
 
@@ -7061,6 +7460,7 @@ spinBtn.style.cssText = ACTION_BTN_CSS;
 spinBtn.addEventListener('click', () => {
   if (spinBtn.disabled) return;
   partner.cancel();                     // Help / Hold Hands: let go first, then spin
+  interactions.beforeMove();            // (Phase 7) real hand-hold: let go / take a request back first
   if (player.startSpin(() => { setActionBusy(false); RINK_LINK.actEnd(); })) { setActionBusy(true); RINK_LINK.act('spin'); }
   spinBtn.blur();
 });
@@ -7070,6 +7470,7 @@ axelBtn.style.cssText = ACTION_BTN_CSS;
 axelBtn.addEventListener('click', () => {
   if (axelBtn.disabled) return;
   partner.cancel();                     // Help / Hold Hands: let go first, then jump
+  interactions.beforeMove();            // (Phase 7) real hand-hold: let go / take a request back first
   const started = player.startTripleAxel(() => { setActionBusy(false); RINK_LINK.actEnd(); });
   if (started) { setActionBusy(true); RINK_LINK.act('axel'); }      // (Phase 6) others see it too
   axelBtn.blur();
@@ -7211,7 +7612,7 @@ function simulate(frameDt, t) {
   while (simAcc >= SIM_STEP) {
     if (proposal.active) proposal.step(SIM_STEP);                 // the proposal drives both characters while it runs
     else {
-      if (!partner.preUpdate(SIM_STEP)) player.update(SIM_STEP);   // the dance drives the player itself; otherwise normal control
+      if (!partner.preUpdate(SIM_STEP) && !interactions.stepLocalFollower(SIM_STEP)) player.update(SIM_STEP);   // the dance drives the player itself; (Phase 7) so does holding hands as the follower; otherwise normal control
       partner.postUpdate(SIM_STEP);
       proposal.afterStep(SIM_STEP);                               // (eases both rigs back for 0.8 s after the proposal)
     }
@@ -7227,7 +7628,9 @@ function simulate(frameDt, t) {
     skateFx2.update(dt);
     if (remoteFixture) remoteFixture.step(dt);                 // (dev-only ?testremotes=N)
     remotePlayers.step(dt);                                    // (Phase 5) real players: smoothed network positions
+    interactions.update(dt);                                   // (Phase 7) followers beside their leaders · menu
     remoteSkaters.update(dt);                                  // (Phase 4) other players: once per frame, after the camera
+    interactions.hands();                                      // (Phase 7) the holding hands meet (after all poses)
   }
   nameTag.update();                                          // (Phase 3) nickname above his / her head
   remotePlayers.updateTags();                                // (Phase 5) other players' nicknames
