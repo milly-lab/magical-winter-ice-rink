@@ -28,6 +28,7 @@
 //     {t:"ireq", to, k}                                          (Phase 7) ask another skater for an interaction (k: "hold")
 //     {t:"ireq-cancel", rid}                                     (Phase 7) take the own request back
 //     {t:"ires", rid, ok}                                        (Phase 7) the asked skater accepts (true) / declines (false)
+//                                                                (Phase 7.4) auto: true = nobody tapped within 3 s (declined as "no answer")
 //     {t:"ia-end", pid, done?}                                   (Phase 7) let go (either of the two) · (Phase 8) done: it ran to its end
 //     {t:"ia-go", pid, m0, hm0, f0, hf0}                         (Phase 8) dance / confess: the leader's couple is in place — start
 //                                                                (m0 / f0 = [x, z] of leader / follower, hm0 / hf0 = headings)
@@ -40,6 +41,7 @@
 //     {t:"act-end", id, n}                                       (Phase 6) …and finished it
 //     {t:"ireq-ok", rid, to, k, ttl}                             (Phase 7) your request was delivered (expires in ttl ms)
 //     {t:"ireq-no", to, k, reason, rid?}                         (Phase 7) your request was refused / declined / expired
+//                                                                (Phase 7.4) reason "timeout" = they did not answer within 3 s
 //     {t:"ireq-in", rid, from, nick, k, ttl}                     (Phase 7) someone asks you (answer within ttl ms)
 //     {t:"ireq-gone", rid, reason}                               (Phase 7) that request no longer stands
 //     {t:"ia-start", pid, k, lead, follow}                       (Phase 7) two skaters started an interaction (to everyone)
@@ -59,7 +61,7 @@
 // the connection (never from the message), a new move is refused while the previous one can still be running (each
 // move has a fixed length), move numbers must increase (no duplicates / replays), and only skaters in the rink get them.
 // Phase 7 (2026-11-08): interactions between two skaters, decided by the server only. One request per skater at a time
-// (10 s), only to a skater who is in the rink, near, not asking / asked / busy themselves; only the asked skater can
+// (answer within 3 s since Phase 7.4; 10 s at most), only to a skater who is in the rink, near, not asking / asked / busy themselves; only the asked skater can
 // answer; an expired / answered / unknown request does nothing; two skaters asking each other = accepted. The request
 // and the pair live in the two connections' attachments (they survive hibernation). Leaving, a move (act) or a new
 // request of either one ends / clears what involved them. Kinds allowed: "hold", "help", "dance", "confess" (Phase 8;
@@ -96,12 +98,19 @@ const IA_KINDS = ['hold', 'help', 'dance', 'confess'];   // (Phase 8: + help, da
 const GO_KINDS = ['dance', 'confess'];
 // (Phase 7.3) an interaction starts only if BOTH pages can play it the same way. A page that is still an older version
 // (e.g. kept open on a phone, or cached) does not know the newer kinds: it would show something else (or nothing) while
-// the other page shows the right thing. Pages tell their kinds in "join"; a page that does not tell = Hold Hands only.
-const CLIENT_VERSION = '7.3';            // the page version that goes with this server (sent as "cv"; older pages are asked to reload)
-const kindsOf = (a) => (Array.isArray(a.ia) ? a.ia : ['hold']);   // (Phase 8) interactions that start together from shared spots (ia-go)
+// the other page shows the right thing. Pages tell their kinds in "join".
+// (Phase 7.4) a page that does not tell is a 7.2 page (cached / kept open after an update): it plays all four kinds the
+// same way, so it is not refused any more (7.3 treated it as Hold Hands only → Help / Dance were refused at once).
+const CLIENT_VERSION = '7.4';            // the page version that goes with this server (sent as "cv"; older pages are asked to reload)
+const PRE73_KINDS = ['hold', 'help', 'dance', 'confess'];
+const kindsOf = (a) => (Array.isArray(a.ia) ? a.ia : PRE73_KINDS);   // (Phase 8) interactions that start together from shared spots (ia-go)
 const GO_DELAY = 300;                    // ms: the dance starts this long after the start message goes out (same moment everywhere)
 const DANCE_MAX = 20000;                 // ms after its start a dance / confession is over for sure (~10.2 s / ~12.3 s)
-const REQ_TTL = 10000;                   // ms a request stands
+const REQ_TTL = 10000;                   // ms a request stands at most
+// (Phase 7.4) the asked skater has 3 s to answer (then the popup closes and the page declines by itself). The request
+// stands 0.8 s longer on the server (a tap at the last moment still arrives); after that it is expired here, so a late
+// 수락 can never start anything. The asker's page gives up a little after that (ttl in ireq-ok).
+const REPLY_MS = 3000, REPLY_GRACE = 800, ASKER_WAIT = REPLY_MS + REPLY_GRACE + 400;
 const REQ_GAP = 1500;                    // ms between two requests of the same skater (no popup spam)
 const IA_RANGE = 14;                     // m: the page opens the menu within 8 m; the server allows a little more (network delay)
 const ACTS = { axel: { min: 2000, max: 6000 }, spin: { min: 8800, max: 14000 }, routine: { min: 23000, max: 32000 } };   // (measured: 2.5 s · 11.0 s · 28.9 s)
@@ -412,11 +421,11 @@ export class RinkRoom extends DurableObject {
           } else if (!this._free(b, now)) no('busy');
           else if (Math.hypot(a.st[0] - b.st[0], a.st[1] - b.st[1]) > IA_RANGE) no('far');
           else {
-            a.req = { rid: crypto.randomUUID(), to: b.id, k: msg.k, exp: now + REQ_TTL };
+            a.req = { rid: crypto.randomUUID(), to: b.id, k: msg.k, exp: now + Math.min(REQ_TTL, REPLY_MS + REPLY_GRACE) };   // (7.4)
             a.reqAt = now;
             this._put(ws, a);
-            this._send(ws, { t: 'ireq-ok', rid: a.req.rid, to: b.id, k: msg.k, ttl: REQ_TTL });
-            this._send(t, { t: 'ireq-in', rid: a.req.rid, from: a.id, nick: a.p.n, k: msg.k, ttl: REQ_TTL });
+            this._send(ws, { t: 'ireq-ok', rid: a.req.rid, to: b.id, k: msg.k, ttl: ASKER_WAIT });
+            this._send(t, { t: 'ireq-in', rid: a.req.rid, from: a.id, nick: a.p.n, k: msg.k, ttl: REPLY_MS });
           }
         }
       } else if (msg.t === 'ireq-cancel') {
@@ -428,12 +437,13 @@ export class RinkRoom extends DurableObject {
         const b = from && from.deserializeAttachment();
         if (!from) this._send(ws, { t: 'ireq-gone', rid: msg.rid, reason: 'unknown' });
         else if (b.req.exp <= now) {
-          b.req = null; this._put(from, b);
+          const k = b.req.k; b.req = null; this._put(from, b);
           this._send(ws, { t: 'ireq-gone', rid: msg.rid, reason: 'expired' });
-          this._send(from, { t: 'ireq-no', rid: msg.rid, to: a.id, k: 'hold', reason: 'expired' });
+          this._send(from, { t: 'ireq-no', rid: msg.rid, to: a.id, k, reason: 'timeout' });   // (7.4: too late = no answer)
         } else if (!msg.ok) {
           const k = b.req.k; b.req = null; this._put(from, b);
-          this._send(from, { t: 'ireq-no', rid: msg.rid, to: a.id, k, reason: 'declined' });
+          // (7.4) auto = the 3 s ran out on the asked page (no answer) / a tap on 거절
+          this._send(from, { t: 'ireq-no', rid: msg.rid, to: a.id, k, reason: msg.auto === true ? 'timeout' : 'declined' });
         } else if (a.pair || b.pair || (a.req && a.req.exp > now)) {
           const k = b.req.k; b.req = null; this._put(from, b);
           this._send(ws, { t: 'ireq-gone', rid: msg.rid, reason: 'busy' });
