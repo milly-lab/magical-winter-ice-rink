@@ -19,7 +19,8 @@
 //
 // Phase 5 (2026-11-06) — basic multiplayer sync. Protocol (JSON text; "ping"/"pong" and hello/hello-ok unchanged):
 //   client → server
-//     {t:"join", nick, style:"skater"|"girl", color, x, z, h}   enter the rink with a profile + position (again = refresh)
+//     {t:"join", nick, style:"skater"|"girl", color, x, z, h, ia?, cv?}   enter the rink with a profile + position (again = refresh)
+//                                                                (Phase 7.3) ia = the interaction kinds this page can play, cv = its version (not "v": that is the speed)
 //     {t:"mv", x, z, h, v, f, ts}                                own position / heading / speed / flags / sender clock (ms)
 //     {t:"act", k, n, x, z, h, v, ts}                            (Phase 6) a move starts: k = "axel" | "spin" | "routine",
 //                                                                n = the sender's move number (always increasing)
@@ -31,7 +32,7 @@
 //     {t:"ia-go", pid, m0, hm0, f0, hf0}                         (Phase 8) dance / confess: the leader's couple is in place — start
 //                                                                (m0 / f0 = [x, z] of leader / follower, hm0 / hf0 = headings)
 //   server → client
-//     {t:"welcome", id, players, max}                            (Phase 1) connection accepted
+//     {t:"welcome", id, players, max, cv}                        (Phase 1) connection accepted · (7.3) cv = latest page version
 //     {t:"join-ok", id, players, max, peers:[P…]}                the players already skating (never yourself)
 //     {t:"peer", …P}                                             someone entered (or re-sent their profile)
 //     {t:"mv", id, x, z, h, v, f, ts}                            someone moved
@@ -92,7 +93,12 @@ const SID_RE = /^[A-Za-z0-9_-]{16,64}$/;
 // whatever the frame rate or network timing) and when the server stops reporting it as running
 // Phase 7 — interactions
 const IA_KINDS = ['hold', 'help', 'dance', 'confess'];   // (Phase 8: + help, dance, confess)
-const GO_KINDS = ['dance', 'confess'];   // (Phase 8) interactions that start together from shared spots (ia-go)
+const GO_KINDS = ['dance', 'confess'];
+// (Phase 7.3) an interaction starts only if BOTH pages can play it the same way. A page that is still an older version
+// (e.g. kept open on a phone, or cached) does not know the newer kinds: it would show something else (or nothing) while
+// the other page shows the right thing. Pages tell their kinds in "join"; a page that does not tell = Hold Hands only.
+const CLIENT_VERSION = '7.3';            // the page version that goes with this server (sent as "cv"; older pages are asked to reload)
+const kindsOf = (a) => (Array.isArray(a.ia) ? a.ia : ['hold']);   // (Phase 8) interactions that start together from shared spots (ia-go)
 const GO_DELAY = 300;                    // ms: the dance starts this long after the start message goes out (same moment everywhere)
 const DANCE_MAX = 20000;                 // ms after its start a dance / confession is over for sure (~10.2 s / ~12.3 s)
 const REQ_TTL = 10000;                   // ms a request stands
@@ -298,7 +304,7 @@ export class RinkRoom extends DurableObject {
     const id = crypto.randomUUID();                             // full 128-bit UUID chosen by the server: clients can never pick or overwrite one
     server.serializeAttachment({ id, joined: true, since: Date.now(), last: Date.now(), win: 0, n: 0, sid, bad: 0, p: null, st: null });
     const players = this._players().length;
-    server.send(json({ t: 'welcome', id, players, max: this.maxPlayers }));
+    server.send(json({ t: 'welcome', id, players, max: this.maxPlayers, cv: CLIENT_VERSION }));
     this._broadcast({ t: 'count', players }, server, this._players(server));   // everyone else: one more player
     await this._ensureSweep();
     await this._save();
@@ -391,12 +397,14 @@ export class RinkRoom extends DurableObject {
       if (msg.t === 'ireq') {
         if (typeof msg.to !== 'string' || msg.to.length > 64 || typeof msg.k !== 'string') { await bad('bad-data'); return; }
         if (!IA_KINDS.includes(msg.k)) no('kind');
+        else if (!kindsOf(a).includes(msg.k)) no('version-self');                          // (7.3) this page is too old for it
         else if (msg.to === a.id) no('self');
         else if (now - (a.reqAt || 0) < REQ_GAP) no('wait');
         else {
           const t = this._byId(msg.to, ws);
           const b = t && t.deserializeAttachment();
           if (!t) no('gone');
+          else if (!kindsOf(b).includes(msg.k)) no('version');                            // (7.3) their page cannot play it yet
           else if (a.pair || (this._incoming(a.id, now)[0] && !(b.req && b.req.to === a.id))) no('busy-self');
           else if (a.req && a.req.exp > now) no('pending');                               // one request at a time
           else if (b.req && b.req.to === a.id && b.req.exp > now && b.req.k === msg.k && !b.pair) {
@@ -455,6 +463,8 @@ export class RinkRoom extends DurableObject {
       const p = cleanProfile(msg), st = cleanState(msg, false);
       if (!p || !st) { await bad('bad-data'); return; }
       a.p = p; a.st = st;
+      // (Phase 7.3) the interaction kinds this page can play (only known kinds are kept; none told = Hold Hands only)
+      a.ia = Array.isArray(msg.ia) ? IA_KINDS.filter((k) => msg.ia.includes(k)) : null;
       ws.serializeAttachment(a);
       const others = this._skaters(ws);
       ws.send(json({ t: 'join-ok', id: a.id, players: this._players().length, max: this.maxPlayers,
