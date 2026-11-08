@@ -6300,7 +6300,7 @@ const RINK_LINK = (() => {
   const SEND_EVERY = 150;                                   // (Phase 5) ms between own movement messages (≤ 6.7/s)
   // (Phase 7.3) this page's version and the interactions it can play; sent on entering, so the server starts an
   // interaction only when both pages play it the same way (an older page still open elsewhere cannot)
-  const PAGE_VERSION = '7.3', PAGE_IA = ['hold', 'help', 'dance', 'confess'];
+  const PAGE_VERSION = '7.4', PAGE_IA = ['hold', 'help', 'dance', 'confess'];
   // (Phase 5) this page's private session key: a reconnect with the same key replaces the old connection on the
   // server at once (no double avatar, no second place taken). Random, never shown to anyone.
   const SID = (() => {
@@ -6944,8 +6944,16 @@ const remotePlayers = (() => {
       }
     }
   }
+  // (Phase 7.4) a nickname shows only within interaction reach (the same 8 m the menu opens at; 0.5 m give so it does
+  // not flicker at the edge). Only the tag: the avatar itself is drawn / moved / animated exactly as before.
+  const TAG_GIVE = 0.5;
   function updateTags() {
-    for (const P of peers.values()) { if (P.a.drawn) P.tag.update(); else P.tag.hide(); }
+    const me = player.mesh.position;
+    for (const P of peers.values()) {
+      const r = P.a.root.position, d = Math.hypot(r.x - me.x, r.z - me.z);
+      P.near = P.a.drawn && (d <= PS_MENU_RANGE || (P.near && d <= PS_MENU_RANGE + TAG_GIVE));
+      if (P.near) P.tag.update(); else P.tag.hide();
+    }
   }
   // (Phase 7) the hand-hold places a follower itself; when it lets go, the network takes over again from where it is shown
   function hold(id, on) {
@@ -7158,7 +7166,7 @@ const interactions = (() => {
   let popFade = 0;
   const popReset = () => { clearTimeout(popFade); pop.style.transition = ''; pop.style.opacity = '1'; pop.style.pointerEvents = ''; };
   const closePop = (fade = false) => {
-    if (inc) clearTimeout(inc.timer);
+    if (inc) { clearTimeout(inc.timer); clearTimeout(inc.fadeT); }
     inc = null;
     if (!fade || pop.style.display === 'none') { popReset(); pop.style.display = 'none'; return; }
     clearTimeout(popFade);
@@ -7714,7 +7722,8 @@ const interactions = (() => {
     switch (m.t) {
       case 'ireq-ok':
         if (out) clearTimeout(out.timer);
-        out = { rid: m.rid, to: m.to, k: m.k, timer: setTimeout(() => { out = null; showPill(); toast(`${nickOf(m.to)}님은 지금 ${label(m.k)}를 할 수 없어요.`); }, m.ttl) };
+        // (7.4) no answer in time (their page closed / old): by now the server has expired it too, so nothing can start
+        out = { rid: m.rid, to: m.to, k: m.k, timer: setTimeout(() => { out = null; showPill(); toast(`${nickOf(m.to)}님이 응답하지 않아 요청이 거절되었어요.`); }, m.ttl) };
         toast(`${nickOf(m.to)}님에게 ${label(m.k)}를 요청했어요.`);
         showPill();
         break;
@@ -7724,6 +7733,7 @@ const interactions = (() => {
         out = null; showPill();
         const nm = nickOf(m.to), what = label(m.k);
         if (m.reason === 'pending') toast('이미 보낸 요청이 있어요.');
+        else if (m.reason === 'timeout' || m.reason === 'expired') toast(`${nm}님이 응답하지 않아 요청이 거절되었어요.`);   // (7.4)
         else if (m.reason === 'version') toast(`${nm}님의 화면이 이전 버전이라 ${what}를 함께할 수 없어요. 새로고침하면 함께할 수 있어요.`, 4);
         else if (m.reason === 'version-self') toast(`이 화면이 이전 버전이에요. 새로고침하면 ${what}를 함께할 수 있어요.`, 4);
         else if (m.reason === 'busy-self' || m.reason === 'wait') toast(`지금은 ${what}를 요청할 수 없어요.`);
@@ -7731,13 +7741,19 @@ const interactions = (() => {
         else toast(`${nm}님은 지금 ${what}를 할 수 없어요.`);
         break;
       }
-      case 'ireq-in':
-        if (inc) clearTimeout(inc.timer);
-        inc = { rid: m.rid, from: m.from, nick: m.nick, k: m.k, timer: setTimeout(() => { closePop(); toast(`${m.nick}님의 요청이 만료되었어요.`); }, m.ttl) };
+      case 'ireq-in': {
+        if (inc) { clearTimeout(inc.timer); clearTimeout(inc.fadeT); }
+        // (Phase 7.4) 3 s to answer (ttl from the server): the popup fades out over the last 0.6 s (still tappable) and
+        // is gone at 3 s; then this page declines by itself ("no answer"), once (inc is cleared at once)
+        const FADE = 600, ttl = m.ttl, rid = m.rid;
+        inc = { rid, from: m.from, nick: m.nick, k: m.k,
+          fadeT: setTimeout(() => { pop.style.transition = `opacity ${FADE / 1000}s linear`; void pop.offsetWidth; pop.style.opacity = '0'; }, Math.max(0, ttl - FADE)),
+          timer: setTimeout(() => { if (!inc || inc.rid !== rid) return; send({ t: 'ires', rid, ok: false, auto: true }); closePop(); toast(`${m.nick}님의 요청에 응답하지 않아 자동으로 거절되었어요.`); }, ttl) };
         popText.textContent = `${m.nick}님이 ${label(m.k)}를 요청하였습니다.`;
         popReset();                                                     // (a new request while the last one still fades)
         pop.style.display = 'block';
         break;
+      }
       case 'ireq-gone':
         if (inc && inc.rid === m.rid) {
           const nm = inc.nick; closePop();
