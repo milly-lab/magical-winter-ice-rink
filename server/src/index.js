@@ -27,7 +27,9 @@
 //     {t:"ireq", to, k}                                          (Phase 7) ask another skater for an interaction (k: "hold")
 //     {t:"ireq-cancel", rid}                                     (Phase 7) take the own request back
 //     {t:"ires", rid, ok}                                        (Phase 7) the asked skater accepts (true) / declines (false)
-//     {t:"ia-end", pid}                                          (Phase 7) let go (either of the two)
+//     {t:"ia-end", pid, done?}                                   (Phase 7) let go (either of the two) · (Phase 8) done: it ran to its end
+//     {t:"ia-go", pid, m0, hm0, f0, hf0}                         (Phase 8) dance / confess: the leader's couple is in place — start
+//                                                                (m0 / f0 = [x, z] of leader / follower, hm0 / hf0 = headings)
 //   server → client
 //     {t:"welcome", id, players, max}                            (Phase 1) connection accepted
 //     {t:"join-ok", id, players, max, peers:[P…]}                the players already skating (never yourself)
@@ -41,6 +43,7 @@
 //     {t:"ireq-gone", rid, reason}                               (Phase 7) that request no longer stands
 //     {t:"ia-start", pid, k, lead, follow}                       (Phase 7) two skaters started an interaction (to everyone)
 //     {t:"ia-end", pid, reason}                                  (Phase 7) …and it ended (to everyone)
+//     {t:"ia-go", pid, m0, hm0, f0, hf0, in}                     (Phase 8) the dance starts `in` ms after this arrives (to everyone)
 //     {t:"leave", id, players}                                   someone left / was disconnected
 //     {t:"count", players}                                       the number of connected players changed
 //   P = {id, nick, style, color, x, z, h, v, f, act?}   act = {k, n, age} (ms since it started) while a move is running
@@ -58,8 +61,9 @@
 // (10 s), only to a skater who is in the rink, near, not asking / asked / busy themselves; only the asked skater can
 // answer; an expired / answered / unknown request does nothing; two skaters asking each other = accepted. The request
 // and the pair live in the two connections' attachments (they survive hibernation). Leaving, a move (act) or a new
-// request of either one ends / clears what involved them. Kinds allowed now: "hold" (Hold Hands; help / dance /
-// confess will use the same path later). Interactions are not stored anywhere else.
+// request of either one ends / clears what involved them. Kinds allowed: "hold", "help", "dance", "confess" (Phase 8;
+// the white-rose condition for confess is checked on the requester's page, where the roses are collected).
+// Interactions are not stored anywhere else.
 //
 // Nothing secret lives here: allowed origins and limits are plain settings in wrangler.jsonc ("vars").
 
@@ -87,7 +91,10 @@ const SID_RE = /^[A-Za-z0-9_-]{16,64}$/;
 // Phase 6 — moves: a new move sooner than ~80% of the previous one's length is refused (the real lengths never trip it,
 // whatever the frame rate or network timing) and when the server stops reporting it as running
 // Phase 7 — interactions
-const IA_KINDS = ['hold'];               // (later: 'help', 'dance', 'confess')
+const IA_KINDS = ['hold', 'help', 'dance', 'confess'];   // (Phase 8: + help, dance, confess)
+const GO_KINDS = ['dance', 'confess'];   // (Phase 8) interactions that start together from shared spots (ia-go)
+const GO_DELAY = 300;                    // ms: the dance starts this long after the start message goes out (same moment everywhere)
+const DANCE_MAX = 20000;                 // ms after its start a dance / confession is over for sure (~10.2 s / ~12.3 s)
 const REQ_TTL = 10000;                   // ms a request stands
 const REQ_GAP = 1500;                    // ms between two requests of the same skater (no popup spam)
 const IA_RANGE = 14;                     // m: the page opens the menu within 8 m; the server allows a little more (network delay)
@@ -124,7 +131,8 @@ function cleanProfile(m) {
   return { n: nick, s: m.style, c: m.color };
 }
 const actOf = (a, now) => (a.act && !a.act.done && now - a.act.at < ACTS[a.act.k].max ? { k: a.act.k, n: a.act.n, age: now - a.act.at } : undefined);
-const pairOf = (a) => (a.pair ? { pid: a.pair.pid, k: a.pair.k, lead: a.pair.lead, follow: a.pair.follow } : undefined);
+const pairOf = (a, now = Date.now()) => (a.pair ? { pid: a.pair.pid, k: a.pair.k, lead: a.pair.lead, follow: a.pair.follow,
+  ...(a.pair.go ? { go: { ...a.pair.go, age: now - a.pair.goAt } } : {}) } : undefined);
 const peerOf = (a, now = Date.now()) => ({ id: a.id, nick: a.p.n, style: a.p.s, color: a.p.c, x: a.st[0], z: a.st[1], h: a.st[2], v: a.st[3], f: a.st[4], act: actOf(a, now) });
 
 // ---------- Worker: routes requests ----------
@@ -371,8 +379,14 @@ export class RinkRoom extends DurableObject {
       return;
     }
     // ---- (Phase 7) interactions: request → answer → together → let go ----
-    if (msg.t === 'ireq' || msg.t === 'ireq-cancel' || msg.t === 'ires' || msg.t === 'ia-end') {
+    if (msg.t === 'ireq' || msg.t === 'ireq-cancel' || msg.t === 'ires' || msg.t === 'ia-end' || msg.t === 'ia-go') {
       if (!a.p) { await bad('not-joined'); return; }
+      // (Phase 8) a dance that is long over (both pages failed to report its end) does not keep anyone busy
+      for (const s of this._skaters()) {
+        const b = s.deserializeAttachment();
+        if (b.pair && b.pair.goAt && now - b.pair.goAt > DANCE_MAX) this._endPair(s, b, 'done');
+      }
+      if (this._skaters().includes(ws)) Object.assign(a, ws.deserializeAttachment());
       const no = (reason, extra = {}) => this._send(ws, { t: 'ireq-no', to: msg.to, k: msg.k, reason, ...extra });
       if (msg.t === 'ireq') {
         if (typeof msg.to !== 'string' || msg.to.length > 64 || typeof msg.k !== 'string') { await bad('bad-data'); return; }
@@ -417,8 +431,22 @@ export class RinkRoom extends DurableObject {
           this._send(ws, { t: 'ireq-gone', rid: msg.rid, reason: 'busy' });
           this._send(from, { t: 'ireq-no', rid: msg.rid, to: a.id, k, reason: 'busy' });
         } else this._startPair(from, b, ws, a, b.req.k);                                  // accepted: the asker leads
+      } else if (msg.t === 'ia-go') {
+        // (Phase 8) only the leader of a dance that has not started yet; the start spots must be real positions
+        const P = a.pair, ok2 = (v) => Array.isArray(v) && v.length === 2 && num(v[0], -LIMIT_X, LIMIT_X) && num(v[1], -LIMIT_Z, LIMIT_Z);
+        if (!P || P.pid !== msg.pid || !GO_KINDS.includes(P.k) || P.lead !== a.id || P.go) { /* not yours / not now: nothing */ }
+        else if (!ok2(msg.m0) || !ok2(msg.f0) || !num(msg.hm0, -1000, 1000) || !num(msg.hf0, -1000, 1000)) { await bad('bad-data'); return; }
+        else {
+          const go = { m0: [r2(msg.m0[0]), r2(msg.m0[1])], hm0: r3(wrapAngle(msg.hm0)), f0: [r2(msg.f0[0]), r2(msg.f0[1])], hf0: r3(wrapAngle(msg.hf0)) };
+          const other = this._byId(P.follow);
+          for (const [s, b] of [[ws, a], [other, other && other.deserializeAttachment()]]) {
+            if (s && b && b.pair && b.pair.pid === P.pid) { b.pair.go = go; b.pair.goAt = now; this._put(s, b); }
+          }
+          this._broadcast({ t: 'ia-go', pid: P.pid, ...go, in: GO_DELAY });
+        }
       } else if (msg.t === 'ia-end') {
-        if (a.pair && a.pair.pid === msg.pid) this._endPair(ws, a, 'released');           // (old / unknown pid: nothing)
+        // (Phase 8) a dance / confession that ran to its end is reported as "done" (every page then ends it the same way)
+        if (a.pair && a.pair.pid === msg.pid) this._endPair(ws, a, msg.done === true && a.pair.go ? 'done' : 'released');   // (old / unknown pid: nothing)
       }
       await this._save();
       return;
@@ -431,7 +459,7 @@ export class RinkRoom extends DurableObject {
       const others = this._skaters(ws);
       ws.send(json({ t: 'join-ok', id: a.id, players: this._players().length, max: this.maxPlayers,
         peers: others.map((s) => peerOf(s.deserializeAttachment())),
-        pairs: [...new Map(this._skaters().map((s) => pairOf(s.deserializeAttachment())).filter(Boolean).map((P) => [P.pid, P])).values()] }));
+        pairs: [...new Map(this._skaters().map((s) => pairOf(s.deserializeAttachment(), now)).filter(Boolean).map((P) => [P.pid, P])).values()] }));
       this._broadcast({ t: 'peer', ...peerOf(a) }, ws, others);
       await this._save();
       return;
