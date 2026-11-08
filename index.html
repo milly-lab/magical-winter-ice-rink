@@ -6098,6 +6098,8 @@ function createNameTag(player, camera) {
   let text = '';
   return {
     set(t) { text = t || ''; el.textContent = text; },
+    hide() { el.style.display = 'none'; },                              // (Phase 5) other players' tags
+    remove() { el.remove(); },
     update() {
       if (!text) { el.style.display = 'none'; return; }
       const R = player.rig;
@@ -6258,6 +6260,7 @@ function createPlayerSetup({ player, cine, camera, nameTag, prepareRig }) {
     applyLook();
     nameTag.set(name);
     window.PLAYER_PROFILE = { style: state.style, nickname: name, color: state.color };   // (later phases send this to the server)
+    try { RINK_LINK.profileReady(); } catch (e) { /* (offline page) */ }   // (Phase 5) enter the shared rink with this profile
     try { localStorage.setItem(PROFILE_KEY, JSON.stringify({ style: state.style, color: state.color, nick: typed })); } catch (e) { /* private mode */ }
     open = false;
     input.blur();
@@ -6278,7 +6281,9 @@ function createPlayerSetup({ player, cine, camera, nameTag, prepareRig }) {
 
 // ===== net/rinkLink.js =====
 // (2026-11-05, Phase 2) connection to the Winterwood multiplayer server (Cloudflare Worker + Durable Object).
-// This phase only connects and enters the shared room — no other players, positions or animations are synced yet.
+// (Phase 5, 2026-11-06) + real players: after the setup screen the player "joins" with the PLAYER_PROFILE and position;
+// the server sends who is already skating and relays everyone's movement (see server/src/index.js for the protocol).
+// Own movement is sent ≤ 6.7×/s, only while it changes and only when someone else is in the rink.
 //  - the loading screen (#rink-loading) stays until the rink has drawn its first frame AND the server has answered;
 //  - "room full" (4001), "daily limit" (4002) and ordinary connection errors / timeouts get different messages;
 //    from each, the player can retry or skate alone in their own rink (offline mode = the rink exactly as before);
@@ -6291,7 +6296,19 @@ const RINK_LINK = (() => {
   const ROOM = { id: 'main', name: '윈터우드 링크장' };
   const CONNECT_TIMEOUT = 10000, PING_EVERY = 25000, PONG_TIMEOUT = 10000;
   const BACKOFF = [1000, 2000, 4000, 8000, 15000, 30000];
+  const SEND_EVERY = 150;                                   // (Phase 5) ms between own movement messages (≤ 6.7/s)
+  // (Phase 5) this page's private session key: a reconnect with the same key replaces the old connection on the
+  // server at once (no double avatar, no second place taken). Random, never shown to anyone.
+  const SID = (() => {
+    const make = () => { const b = new Uint8Array(16); crypto.getRandomValues(b); return btoa(String.fromCharCode(...b)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); };
+    try {
+      let k = sessionStorage.getItem('rink.sid');
+      if (!/^[A-Za-z0-9_-]{16,64}$/.test(k || '')) { k = make(); sessionStorage.setItem('rink.sid', k); }
+      return k;
+    } catch (e) { return make(); }
+  })();
   const MSG = {
+    replaced: { head: '링크장 서버에 연결하지 못했어요.', body: '인터넷 연결을 확인하고 다시 시도해 주세요. 나만의 링크장에서 먼저 스케이트를 타실 수도 있어요.' },
     full: { head: '현재 모든 링크장이 꽉 찼어요!⛸️', body: '기다리시는 동안 나만의 링크장에서 먼저 신나게 스케이트를 타실 수 있어요.' },
     daily: { head: '오늘 링크장 입장이 모두 마감되었어요.', body: '매일 오전 9시에 다시 열려요. 그동안 나만의 링크장에서 스케이트를 타실 수 있어요.' },
     error: { head: '링크장 서버에 연결하지 못했어요.', body: '인터넷 연결을 확인하고 다시 시도해 주세요. 나만의 링크장에서 먼저 스케이트를 타실 수도 있어요.' },
@@ -6302,6 +6319,9 @@ const RINK_LINK = (() => {
     retry: 0, retryTimer: 0, connectTimer: 0, pingTimer: 0, pongTimer: 0,
     resolved: false,          // the loading screen may close (online, or the player chose offline)
     pending: null,            // resolve() of a manual reconnect from the HUD
+    joined: false,            // (Phase 5) entered the shared rink on this connection (join-ok received)
+    spawned: false,           // (Phase 5) the random start spot was chosen (only once, before the first setup)
+    sent: { t: -Infinity, x: 0, z: 0, h: 0, v: 0, f: -1 }, sendNow: false, lastJoin: -Infinity,
   };
   const el = document.getElementById('rink-loading');
   const toast = (t, s = 3) => { try { STORY_UI.toast(t, s); } catch (e) { /* (UI not ready) */ } };
@@ -6348,25 +6368,40 @@ const RINK_LINK = (() => {
     clearTimers();
     if (L.ws) { try { L.ws.onclose = L.ws.onmessage = L.ws.onerror = null; L.ws.close(); } catch (e) { /* ignore */ } }
     let ws, welcomed = false, refused = null, done = false;
-    try { ws = new WebSocket(URL_WS); } catch (e) { setTimeout(() => failed('error'), 0); return; }
+    try { ws = new WebSocket(URL_WS + '?sid=' + SID); } catch (e) { setTimeout(() => failed('error'), 0); return; }
     L.ws = ws;
-    L.connectTimer = setTimeout(() => { if (!welcomed) { finish(); try { ws.close(); } catch (e) { /* ignore */ } failed('error'); } }, CONNECT_TIMEOUT);
-    const finish = () => { done = true; ws.onclose = ws.onmessage = ws.onerror = null; clearTimers(); if (L.ws === ws) L.ws = null; };
+    // (Phase 5 fix) if the page was busy (e.g. still building the rink) the timer can fire before an answer that already
+    // arrived is handled — give those waiting messages a moment first, then use the server's reason if there was one
+    L.connectTimer = setTimeout(() => setTimeout(() => {
+      if (welcomed || done) return;
+      finish(); try { ws.close(); } catch (e) { /* ignore */ }
+      failed(refused === 'room-full' ? 'full' : refused === 'daily-limit' ? 'daily' : 'error');
+    }, 60), CONNECT_TIMEOUT);
+    const finish = () => { done = true; ws.onclose = ws.onmessage = ws.onerror = null; clearTimers(); if (L.ws === ws) L.ws = null; leftRink(); };
     ws.onmessage = (ev) => {
       if (ev.data === 'pong') { clearTimeout(L.pongTimer); return; }
       let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
       if (m.t === 'welcome') {
         welcomed = true; clearTimeout(L.connectTimer);
         L.id = m.id; L.players = m.players || 1; L.max = m.max || L.max;
+        if (!L.spawned && L.mode === 'loading' && playerSetup && playerSetup.open && !TEST_NPC) { L.spawned = true; spawnAtRandom(); }   // (Phase 5; ?testnpc=1 keeps the fixed start next to the test NPC)
         online();
+        sendJoin();                                                    // (Phase 5) only once the profile is chosen
       } else if (m.t === 'refused') refused = m.reason;
       else if (m.t === 'hello-ok') { L.players = m.players; hud(); }
+      // (Phase 5) other players
+      else if (m.t === 'join-ok') { L.joined = true; L.players = m.players; hud(); remotePlayers.reset(m.peers); L.sendNow = true; }
+      else if (m.t === 'peer') { if (L.joined) { remotePlayers.upsert(m); L.sendNow = true; } }   // (newcomer: send them our state)
+      else if (m.t === 'mv') { if (L.joined) remotePlayers.move(m); }
+      else if (m.t === 'leave') { remotePlayers.remove(m.id); L.players = m.players; hud(); }
+      else if (m.t === 'count') { L.players = m.players; hud(); }
       else if (m.t === 'notice' && m.reason === 'daily-limit-soon') { /* players already inside keep playing */ }
     };
     ws.onclose = (ev) => {
       if (done) return;
       finish();
-      const reason = refused === 'room-full' || ev.code === 4001 ? 'full' : refused === 'daily-limit' || ev.code === 4002 ? 'daily' : 'error';
+      const reason = refused === 'room-full' || ev.code === 4001 ? 'full' : refused === 'daily-limit' || ev.code === 4002 ? 'daily'
+        : ev.code === 4003 ? 'replaced' : 'error';                    // (4003: this page connected again elsewhere — no retry loop)
       if (welcomed) dropped(reason); else failed(reason);
     };
     ws.onerror = () => { /* a close event follows */ };
@@ -6398,7 +6433,8 @@ const RINK_LINK = (() => {
     const wasOnline = L.mode === 'online';
     offline();
     if (L.pending) { L.pending(false); L.pending = null; }
-    toast(reason === 'full' ? '현재 모든 링크장이 꽉 찼어요!⛸️ 나만의 링크장에서 계속 타실 수 있어요.'
+    toast(reason === 'replaced' ? '다른 화면에서 같은 링크장에 들어와서, 여기서는 나만의 링크장으로 이어서 타요.'
+      : reason === 'full' ? '현재 모든 링크장이 꽉 찼어요!⛸️ 나만의 링크장에서 계속 타실 수 있어요.'
       : reason === 'daily' ? '오늘 링크장 입장이 모두 마감되었어요. 오전 9시에 다시 열려요.'
       : wasOnline ? '링크장 서버에 다시 연결하지 못했어요. 왼쪽 위 메뉴에서 다시 연결할 수 있어요.'
       : '링크장 서버에 연결하지 못했어요. 잠시 후 다시 시도해 주세요.', 4);
@@ -6420,6 +6456,7 @@ const RINK_LINK = (() => {
   }
   function offline() {
     clearTimers();
+    leftRink();                                                       // (Phase 5) nobody else in the own rink
     if (L.ws) { try { L.ws.onclose = L.ws.onmessage = L.ws.onerror = null; L.ws.close(1000, 'offline'); } catch (e) { /* ignore */ } L.ws = null; }
     L.mode = 'offline'; L.retry = 0; L.players = 0; L.resolved = true;
     hud();
@@ -6429,7 +6466,63 @@ const RINK_LINK = (() => {
   document.addEventListener('visibilitychange', () => {
     if (document.hidden || L.mode !== 'online') return;
     if (!L.ws || L.ws.readyState > 1) { clearTimeout(L.retryTimer); connect(); }
+    else if (L.joined) sendJoin(true);                // (Phase 5) still connected: fetch everyone's current state again
   });
+  // (Phase 5) leaving the page (reload / close / navigate): close cleanly so the others see us leave at once
+  addEventListener('pagehide', () => {
+    const ws = L.ws;
+    if (!ws) return;
+    clearTimers(); L.ws = null; leftRink();
+    try { ws.onclose = ws.onmessage = ws.onerror = null; ws.close(1000, 'bye'); } catch (e) { /* ignore */ }
+  });
+  addEventListener('pageshow', (e) => { if (e.persisted && L.mode === 'online' && !L.ws) connect(); });   // (back from the page cache)
+
+  // ---- (Phase 5) the shared rink ----
+  function send(obj) { if (L.ws && L.ws.readyState === 1) { try { L.ws.send(JSON.stringify(obj)); return true; } catch (e) { /* closing */ } } return false; }
+  function selfState() {
+    const P = player, p = P.mesh.position, v = P.velocity;
+    const pushing = P.keys.size > 0 || (P.stick && P.stick.m > 0) || (P.target !== null && P.target !== undefined);
+    return { x: Math.round(p.x * 100) / 100, z: Math.round(p.z * 100) / 100, h: Math.round(Math.atan2(Math.sin(P.heading), Math.cos(P.heading)) * 1000) / 1000,
+      v: Math.round(Math.min(29, Math.hypot(v.x, v.z)) * 100) / 100, f: pushing ? 1 : 0 };
+  }
+  // enter (or re-enter) with the profile chosen on the setup screen; nothing is sent before it is chosen
+  function sendJoin(resync = false) {
+    const P = window.PLAYER_PROFILE;
+    if (!P || L.mode !== 'online') return;
+    const now = performance.now();
+    if (resync && now - L.lastJoin < 2000) return;   // (at most every 2 s)
+    L.lastJoin = now;
+    const s = selfState();
+    send({ t: 'join', nick: P.nickname, style: P.style, color: P.color, x: s.x, z: s.z, h: s.h });
+  }
+  function leftRink() { L.joined = false; remotePlayers.clear(); }
+  // once per frame: own movement (only while it changes, and only if someone else is there to see it)
+  function tick() {
+    if (!L.joined || !remotePlayers.count || !L.ws || L.ws.readyState !== 1) return;
+    const now = performance.now(), S = L.sent;
+    if (now - S.t < SEND_EVERY) return;
+    const s = selfState();
+    const dh = Math.abs(Math.atan2(Math.sin(s.h - S.h), Math.cos(s.h - S.h)));
+    if (!L.sendNow && Math.abs(s.x - S.x) + Math.abs(s.z - S.z) < 0.01 && dh < 0.005 && Math.abs(s.v - S.v) < 0.05 && s.f === S.f) return;
+    if (!send({ t: 'mv', x: s.x, z: s.z, h: s.h, v: s.v, f: s.f, ts: Math.round(now) })) return;
+    S.t = now; S.x = s.x; S.z = s.z; S.h = s.h; S.v = s.v; S.f = s.f; L.sendNow = false;
+  }
+  // first entry while online: start somewhere random on the ice (not on the island), facing the tree
+  function spawnAtRandom() {
+    const b = world.bounds, P = player;
+    let x = 0, z = 0, ok = false;
+    for (let i = 0; i < 200 && !ok; i++) {
+      x = (Math.random() * 2 - 1) * (b.rx - 6); z = (Math.random() * 2 - 1) * (b.rz - 5);
+      ok = b.dist(x, z) < -4 && Math.hypot(x, z) > b.islandRadius + 4;
+    }
+    if (!ok) return;
+    const p = P.mesh.position, h = Math.atan2(-x, -z), dh = h - P.heading, c = Math.cos(dh), sn = Math.sin(dh);
+    const move = (v) => { const ox = v.x - p.x, oz = v.z - p.z; v.x = x + ox * c + oz * sn; v.z = z - ox * sn + oz * c; };
+    move(cine.pos); move(cine.look);                                // the camera keeps its framing around the skater
+    if (cine.yaw !== null) cine.yaw += dh;
+    p.x = x; p.z = z; P.heading = h; P.mesh.rotation.y = h; P.velocity.set(0, 0, 0);
+    if (skateFx.last) for (const k in skateFx.last) skateFx.last[k] = null;   // (no blade mark across the jump)
+  }
 
   // ---- ROOM_SERVICE (HUD) hooks ----
   // "인원 새로고침" (and opening the room popup): ask the server for the count — at most once every 2 s, so repeated
@@ -6451,6 +6544,9 @@ const RINK_LINK = (() => {
 
   return {
     start() { connect(); },
+    profileReady() { sendJoin(); },                                   // (Phase 5) setup screen done
+    tick,
+    get joined() { return L.joined; },
     get mode() { return L.mode; },
     get id() { return L.id; },
     get players() { return L.players; },
@@ -6637,6 +6733,96 @@ const remoteSkaters = (() => {
   }
   const PUSH_KEYS = new Set(['w']);
   return { add, remove, update, list, stats };
+})();
+
+// ===== net/remotePlayers.js =====
+// (2026-11-06, Phase 5) the REAL other players, as told by the server (RINK_LINK): one Phase 4 light avatar + a nickname
+// tag each. Network updates arrive ~6×/s at uneven times, so each avatar is drawn a little in the past (DELAY) and
+// smoothly interpolated between the received positions / headings (short gaps are bridged by gliding on for ≤ 0.25 s;
+// a jump of more than 8 m is shown as a jump). Their skating animation uses the received speed, push flag and the turn
+// rate of the smoothed heading. Nothing here touches the own skater, the joystick or the camera.
+const remotePlayers = (() => {
+  const DELAY = 220, MAX_EXTRAP = 250, SNAP = 8, KEEP = 12;
+  const peers = new Map();                       // id → { a, tag, buf: [samples], base, nick }
+  const wrap = (h) => Math.atan2(Math.sin(h), Math.cos(h));
+  const sample = (m, t) => ({ t, x: m.x, z: m.z, h: m.h, v: m.v || 0, f: m.f || 0 });
+  function upsert(m) {
+    let P = peers.get(m.id);
+    if (P && P.a.style !== m.style) { remove(m.id); P = null; }     // (other model: rebuild)
+    if (!P) {
+      const a = remoteSkaters.add({ id: m.id, style: m.style, color: m.color, x: m.x, z: m.z, heading: m.h });
+      const tag = createNameTag({ rig: a.rig, mesh: a.root }, camera);
+      P = { a, tag, buf: [], base: null, h: m.h };
+      peers.set(m.id, P);
+    }
+    P.a.rig.knit.color.setHex(m.color);
+    P.tag.set(m.nick);
+    P.buf.length = 0; P.base = null;                               // fresh start at the given spot (no glide from old data)
+    P.buf.push(sample(m, performance.now() - DELAY));
+  }
+  function move(m) {
+    const P = peers.get(m.id);
+    if (!P) return;
+    const now = performance.now();
+    // sender clock → own clock: the smallest (arrival − send time) seen is the least-delayed path; drifts up slowly
+    const est = now - (m.ts || 0);
+    P.base = P.base === null || est < P.base ? est : P.base + (est - P.base) * 0.02;
+    let t = (m.ts || 0) + P.base;
+    const last = P.buf[P.buf.length - 1];
+    if (last && t <= last.t) t = last.t + 1;                       // (keep order)
+    P.buf.push(sample(m, t));
+    if (P.buf.length > KEEP) P.buf.shift();
+  }
+  function remove(id) {
+    const P = peers.get(id);
+    if (!P) return;
+    peers.delete(id);
+    remoteSkaters.remove(P.a);
+    P.tag.remove();
+  }
+  function clear() { for (const id of [...peers.keys()]) remove(id); }
+  function reset(list) {
+    clear();
+    for (const m of list || []) upsert(m);
+  }
+  // once per frame, before the avatars are animated / culled (remoteSkaters.update)
+  function step(dt) {
+    if (!peers.size) return;
+    const rt = performance.now() - DELAY;
+    for (const P of peers.values()) {
+      const B = P.buf, a = P.a;
+      while (B.length > 2 && B[1].t <= rt) B.shift();               // keep one sample at / before the render time
+      let x, z, h, v, f;
+      const s0 = B[0], s1 = B[1];
+      if (!s1 || rt <= s0.t) {                                      // only one state so far (or not yet due): hold it
+        x = s0.x; z = s0.z; h = s0.h; v = s0.v; f = s0.f;
+        if (!s1 && rt - s0.t > MAX_EXTRAP) { v = 0; f = 0; }
+      }
+      if (s1 && rt > s0.t) {
+        const jump = Math.hypot(s1.x - s0.x, s1.z - s0.z) > SNAP;
+        if (rt < s1.t) {                                            // between two received states
+          const k = jump ? 0 : (rt - s0.t) / (s1.t - s0.t);
+          x = s0.x + (s1.x - s0.x) * k; z = s0.z + (s1.z - s0.z) * k;
+          h = s0.h + wrap(s1.h - s0.h) * k; v = s0.v + (s1.v - s0.v) * k; f = s0.f;
+        } else {                                                    // past the newest: glide on briefly, then hold
+          const span = Math.max(1, s1.t - s0.t), e = jump ? 0 : Math.min(rt - s1.t, MAX_EXTRAP) / span;
+          x = s1.x + (s1.x - s0.x) * e; z = s1.z + (s1.z - s0.z) * e;
+          h = s1.h + wrap(s1.h - s0.h) * Math.min(e, 1); v = s1.v; f = s1.f;
+          if (rt - s1.t > MAX_EXTRAP) { v = 0; f = 0; }
+        }
+      }
+      // turn rate from the smoothed heading (for the body lean), and the skating animation inputs
+      const dh = wrap(h - P.h);
+      P.h = h;
+      a.yawRate = dt > 0 ? THREE.MathUtils.clamp(dh / dt, -6, 6) : 0;
+      a.root.position.x = x; a.root.position.z = z; a.root.rotation.y = h;
+      a.speed = v; a.pushing = (f & 1) === 1;
+    }
+  }
+  function updateTags() {
+    for (const P of peers.values()) { if (P.a.drawn) P.tag.update(); else P.tag.hide(); }
+  }
+  return { upsert, move, remove, clear, reset, step, updateTags, get count() { return peers.size; } };
 })();
 
 // development-only measurement fixture: ?testremotes=N (1–8) adds N avatars skating loops around the tree.
@@ -6941,9 +7127,12 @@ function simulate(frameDt, t) {
     skateFx.update(dt);
     skateFx2.update(dt);
     if (remoteFixture) remoteFixture.step(dt);                 // (dev-only ?testremotes=N)
+    remotePlayers.step(dt);                                    // (Phase 5) real players: smoothed network positions
     remoteSkaters.update(dt);                                  // (Phase 4) other players: once per frame, after the camera
   }
   nameTag.update();                                          // (Phase 3) nickname above his / her head
+  remotePlayers.updateTags();                                // (Phase 5) other players' nicknames
+  RINK_LINK.tick();                                          // (Phase 5) send own movement (≤ 6.7/s, only when it changes)
   world.update(t);
 }
 

@@ -1,4 +1,4 @@
-// Winterwood Ice Rink — multiplayer server (Phase 1: connection only)
+// Winterwood Ice Rink — multiplayer server (Phase 1: connection · Phase 5: players + movement relay)
 //
 // Cloudflare Worker ("gatekeeper") + one Durable Object ("RinkRoom") that owns the shared rink.
 //
@@ -16,7 +16,27 @@
 //     room can never run the free allowance dry. Limits reset at 00:00 UTC (09:00 KST).
 // The counter is saved every 100 units (every 20 above the soft limit). When the room wakes from hibernation the
 // last unsaved units are unknown, so one full save interval is added — the counter can only run ahead, never behind.
-// NOT implemented yet: player state, movement relay, avatars, interaction requests (later phases).
+//
+// Phase 5 (2026-11-06) — basic multiplayer sync. Protocol (JSON text; "ping"/"pong" and hello/hello-ok unchanged):
+//   client → server
+//     {t:"join", nick, style:"skater"|"girl", color, x, z, h}   enter the rink with a profile + position (again = refresh)
+//     {t:"mv", x, z, h, v, f, ts}                                own position / heading / speed / flags / sender clock (ms)
+//   server → client
+//     {t:"welcome", id, players, max}                            (Phase 1) connection accepted
+//     {t:"join-ok", id, players, max, peers:[P…]}                the players already skating (never yourself)
+//     {t:"peer", …P}                                             someone entered (or re-sent their profile)
+//     {t:"mv", id, x, z, h, v, f, ts}                            someone moved
+//     {t:"leave", id, players}                                   someone left / was disconnected
+//     {t:"count", players}                                       the number of connected players changed
+//   P = {id, nick, style, color, x, z, h, v, f}
+// Every value is checked (types, ranges, the 8 top colours, nickname length / characters); bad messages get an
+// "error" reply and a client that keeps sending them is disconnected. Nothing is stored permanently: the player
+// list is the open connections themselves (their attachments survive hibernation).
+// Duplicates / ghosts: each page sends a random session key (?sid=…). A new connection with the same key replaces
+// the old one at once (it is closed with 4003 and removed for everyone) — e.g. a phone coming back from the
+// background. Connections that went silent (no "ping" and no message for 75 s, e.g. a phone that was locked) are
+// removed by a sweep every 30 s, which runs only while someone is connected.
+// NOT implemented yet: jumps / spins / interaction requests (later phases).
 //
 // Nothing secret lives here: allowed origins and limits are plain settings in wrangler.jsonc ("vars").
 
@@ -32,6 +52,16 @@ const CONNECT_UNITS = 20;               // a new connection is 1 billed request 
 const SAVE_EVERY = 100;                 // persist the counter every N units (≈ 20,000 rows written/day at most)…
 const SAVE_EVERY_NEAR_LIMIT = 20;       // …and more often once past the soft limit (more precise near the hard stop)
 const utf8 = new TextEncoder();
+// Phase 5
+const SWEEP_MS = 30000;                 // dead-connection sweep interval (only while connections exist; each run = 1 request)
+const SILENT_MS = 75000;                // no ping / message for this long → the connection is treated as gone
+const BAD_MAX = 20;                     // invalid messages tolerated per connection before it is closed
+const NICK_MAX = 8;                     // characters (같은 기준: 한글 1자 = 1)
+const STYLES = ['skater', 'girl'];
+const TOP_COLORS = [0xf1e8d6, 0xf3cfd4, 0xf5d6bf, 0xf2e6b3, 0xcbe8da, 0xc7dcf2, 0xcfd0f2, 0xe8d2ec];   // = the page's 8 choices
+const LIMIT_X = 70, LIMIT_Z = 37;       // a little outside the rink (66.6 × 33.3 half sizes)
+const SID_RE = /^[A-Za-z0-9_-]{16,64}$/;
+const BAD_CHARS = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2066-\u2069\ufeff]/;
 
 // ---------- helpers ----------
 function allowedOrigins(env) {
@@ -45,6 +75,24 @@ function originAllowed(request, env) {
 }
 const utcDay = () => new Date().toISOString().slice(0, 10);   // free-plan limits reset at 00:00 UTC (09:00 KST)
 const json = (obj) => JSON.stringify(obj);
+const num = (v, lo, hi) => (typeof v === 'number' && Number.isFinite(v) && v >= lo && v <= hi);
+const r2 = (v) => Math.round(v * 100) / 100, r3 = (v) => Math.round(v * 1000) / 1000;
+const wrapAngle = (h) => Math.atan2(Math.sin(h), Math.cos(h));
+// returns a clean state [x, z, h, v, f] or null
+function cleanState(m, needMove) {
+  if (!num(m.x, -LIMIT_X, LIMIT_X) || !num(m.z, -LIMIT_Z, LIMIT_Z) || !num(m.h, -1000, 1000)) return null;
+  const v = m.v === undefined && !needMove ? 0 : m.v, f = m.f === undefined && !needMove ? 0 : m.f;
+  if (!num(v, 0, 30) || !Number.isInteger(f) || f < 0 || f > 255) return null;
+  return [r2(m.x), r2(m.z), r3(wrapAngle(m.h)), r2(v), f];
+}
+function cleanProfile(m) {
+  if (typeof m.nick !== 'string' || !STYLES.includes(m.style) || !TOP_COLORS.includes(m.color)) return null;
+  const nick = m.nick.normalize('NFC').replace(/\s+/g, ' ').trim();
+  const len = Array.from(nick).length;
+  if (len < 1 || len > NICK_MAX || utf8.encode(nick).length > 64 || BAD_CHARS.test(nick)) return null;
+  return { n: nick, s: m.style, c: m.color };
+}
+const peerOf = (a) => ({ id: a.id, nick: a.p.n, style: a.p.s, color: a.p.c, x: a.st[0], z: a.st[1], h: a.st[2], v: a.st[3], f: a.st[4] });
 
 // ---------- Worker: routes requests ----------
 export default {
@@ -108,8 +156,34 @@ export class RinkRoom extends DurableObject {
     }
     await this._save(true);
   }
-  _players() {
-    return this.ctx.getWebSockets().filter((ws) => (ws.deserializeAttachment() || {}).joined);
+  _players(except = null) {
+    return this.ctx.getWebSockets().filter((ws) => { if (ws === except) return false; const a = ws.deserializeAttachment() || {}; return a.joined && !a.gone; });
+  }
+  // (Phase 5) players who entered the rink (profile + position), except one
+  _skaters(except = null) {
+    return this._players(except).filter((ws) => (ws.deserializeAttachment() || {}).p);
+  }
+  _broadcast(obj, except = null, list = null) {
+    const text = json(obj);
+    for (const s of list || this._skaters(except)) { if (s !== except) { try { s.send(text); } catch { /* closing */ } } }
+  }
+  // remove a connection for everyone (left, replaced, silent): tell the others once, then close it
+  _drop(ws, code, reason) {
+    const a = ws.deserializeAttachment() || {};
+    if (a.gone) return;
+    a.gone = true;
+    try { ws.serializeAttachment(a); } catch { /* closed */ }
+    if (a.joined) {
+      const rest = this._players(ws), n = rest.length;
+      if (a.p) {                                               // skaters remove the avatar; players still choosing get the count
+        this._broadcast({ t: 'leave', id: a.id, players: n }, ws, rest.filter((s) => (s.deserializeAttachment() || {}).p));
+        this._broadcast({ t: 'count', players: n }, ws, rest.filter((s) => !(s.deserializeAttachment() || {}).p));
+      } else this._broadcast({ t: 'count', players: n }, ws, rest);
+    }
+    if (code) { try { ws.close(code, reason); } catch { /* already closed */ } }
+  }
+  async _ensureSweep() {
+    if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + SWEEP_MS);
   }
 
   async fetch(request) {
@@ -117,6 +191,15 @@ export class RinkRoom extends DurableObject {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
     this.ctx.acceptWebSocket(server);
+    // (Phase 5) the same page reconnecting (e.g. back from the background): its old connection is replaced first,
+    // so it never shows twice and never takes a second place in the room
+    const sidRaw = new URL(request.url).searchParams.get('sid') || '';
+    const sid = SID_RE.test(sidRaw) ? sidRaw : null;
+    if (sid) {
+      for (const old of this.ctx.getWebSockets()) {
+        if (old !== server && (old.deserializeAttachment() || {}).sid === sid) this._drop(old, 4003, 'replaced');
+      }
+    }
     // refuse politely (the client can read the reason): room full, or today's free budget nearly used up
     let refuse = null;
     if (this.count >= this.softLimit) refuse = { code: 4002, reason: 'daily-limit' };
@@ -128,8 +211,11 @@ export class RinkRoom extends DurableObject {
       return new Response(null, { status: 101, webSocket: client });
     }
     const id = crypto.randomUUID();                             // full 128-bit UUID chosen by the server: clients can never pick or overwrite one
-    server.serializeAttachment({ id, joined: true, since: Date.now(), win: 0, n: 0 });
-    server.send(json({ t: 'welcome', id, players: this._players().length, max: this.maxPlayers }));
+    server.serializeAttachment({ id, joined: true, since: Date.now(), last: Date.now(), win: 0, n: 0, sid, bad: 0, p: null, st: null });
+    const players = this._players().length;
+    server.send(json({ t: 'welcome', id, players, max: this.maxPlayers }));
+    this._broadcast({ t: 'count', players }, server, this._players(server));   // everyone else: one more player
+    await this._ensureSweep();
     await this._save();
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -146,37 +232,87 @@ export class RinkRoom extends DurableObject {
     }
     // per-connection rate limit: a client that floods is disconnected (dropped messages would still be billed)
     const now = Date.now();
+    if (a.gone) return;                                        // (replaced / timed out: closing)
     if (now - (a.win || 0) > RATE_WINDOW_MS) { a.win = now; a.n = 0; }
     a.n = (a.n || 0) + 1;
+    a.last = now;
     ws.serializeAttachment(a);
-    if (a.n > RATE_MAX) { ws.close(4008, 'rate-limit'); await this._save(true); return; }
+    if (a.n > RATE_MAX) { this._drop(ws, 4008, 'rate-limit'); await this._save(true); return; }
     // real UTF-8 size (Korean text is 3 bytes per character); .length alone would let ~3 KB through
     const size = typeof message === 'string'
       ? (message.length > MAX_MESSAGE_BYTES ? message.length : utf8.encode(message).length)   // length ≤ bytes: no need to encode huge strings
       : message.byteLength;
-    if (size > MAX_MESSAGE_BYTES) { ws.close(1009, 'too-big'); await this._save(); return; }
+    if (size > MAX_MESSAGE_BYTES) { this._drop(ws, 1009, 'too-big'); await this._save(); return; }
     if (typeof message !== 'string') { ws.send(json({ t: 'error', reason: 'text-only' })); return; }
 
     let msg;
     try { msg = JSON.parse(message); } catch { ws.send(json({ t: 'error', reason: 'bad-json' })); return; }
 
-    if (msg && msg.t === 'hello') {
+    const bad = async (reason) => {                            // invalid data: reply; a client that keeps doing it is closed
+      a.bad = (a.bad || 0) + 1;
+      ws.serializeAttachment(a);
+      if (a.bad > BAD_MAX) { this._drop(ws, 4009, 'bad-data'); await this._save(true); return; }
+      ws.send(json({ t: 'error', reason }));
+      await this._save();
+    };
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) { await bad('bad-data'); return; }
+
+    if (msg.t === 'mv') {                                      // (Phase 5) movement: keep the latest, pass it on
+      if (!a.p) { await bad('not-joined'); return; }
+      const st = cleanState(msg, true);
+      if (!st || !(msg.ts === undefined || num(msg.ts, 0, 9007199254740991))) { await bad('bad-data'); return; }
+      a.st = st;
+      ws.serializeAttachment(a);
+      this._broadcast({ t: 'mv', id: a.id, x: st[0], z: st[1], h: st[2], v: st[3], f: st[4], ts: Math.floor(msg.ts || 0) }, ws);
+      await this._save();
+      return;
+    }
+    if (msg.t === 'join') {                                    // (Phase 5) enter the rink (sent again after a reconnect / resync)
+      const p = cleanProfile(msg), st = cleanState(msg, false);
+      if (!p || !st) { await bad('bad-data'); return; }
+      a.p = p; a.st = st;
+      ws.serializeAttachment(a);
+      const others = this._skaters(ws);
+      ws.send(json({ t: 'join-ok', id: a.id, players: this._players().length, max: this.maxPlayers,
+        peers: others.map((s) => peerOf(s.deserializeAttachment())) }));
+      this._broadcast({ t: 'peer', ...peerOf(a) }, ws, others);
+      await this._save();
+      return;
+    }
+
+    if (msg.t === 'hello') {
       ws.send(json({ t: 'hello-ok', id: a.id, players: this._players().length, max: this.maxPlayers, serverTime: now }));
-    } else if (msg && msg.t === 'echo') {
+    } else if (msg.t === 'echo') {
       ws.send(json({ t: 'echo', id: a.id, data: String(msg.data ?? '').slice(0, 200), serverTime: now }));
     } else {
-      ws.send(json({ t: 'error', reason: 'unknown-type' }));   // movement / interactions arrive in later phases
+      ws.send(json({ t: 'error', reason: 'unknown-type' }));   // interactions arrive in later phases
     }
     await this._save();
   }
 
   async webSocketClose(ws, code, reason) {
+    this._drop(ws, 0);                                         // (Phase 5) gone for everyone else, right away
     try { ws.close(code, reason); } catch { /* already closed */ }
     await this._save(true);
   }
 
   async webSocketError(ws) {
-    try { ws.close(1011, 'error'); } catch { /* already closed */ }
+    this._drop(ws, 1011, 'error');
+  }
+
+  // (Phase 5) every 30 s while anyone is connected: remove connections that went silent (no ping, no message)
+  async alarm() {
+    this._use(CONNECT_UNITS);                                  // an alarm run is a billed request too
+    const now = Date.now();
+    for (const ws of this.ctx.getWebSockets()) {
+      const a = ws.deserializeAttachment() || {};
+      if (a.gone) { try { ws.close(4004, 'timeout'); } catch { /* closed */ } continue; }
+      const pinged = this.ctx.getWebSocketAutoResponseTimestamp(ws);
+      const last = Math.max(a.last || a.since || 0, pinged ? pinged.getTime() : 0);
+      if (now - last > SILENT_MS) this._drop(ws, 4004, 'timeout');
+    }
+    if (this._players().length) await this.ctx.storage.setAlarm(now + SWEEP_MS);
+    await this._save();
   }
 }
 
