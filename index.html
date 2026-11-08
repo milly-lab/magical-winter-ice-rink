@@ -6298,6 +6298,9 @@ const RINK_LINK = (() => {
   const CONNECT_TIMEOUT = 10000, PING_EVERY = 25000, PONG_TIMEOUT = 10000;
   const BACKOFF = [1000, 2000, 4000, 8000, 15000, 30000];
   const SEND_EVERY = 150;                                   // (Phase 5) ms between own movement messages (≤ 6.7/s)
+  // (Phase 7.3) this page's version and the interactions it can play; sent on entering, so the server starts an
+  // interaction only when both pages play it the same way (an older page still open elsewhere cannot)
+  const PAGE_VERSION = '7.3', PAGE_IA = ['hold', 'help', 'dance', 'confess'];
   // (Phase 5) this page's private session key: a reconnect with the same key replaces the old connection on the
   // server at once (no double avatar, no second place taken). Random, never shown to anyone.
   const SID = (() => {
@@ -6385,6 +6388,11 @@ const RINK_LINK = (() => {
       let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
       if (m.t === 'welcome') {
         welcomed = true; clearTimeout(L.connectTimer);
+        // (Phase 7.3) the server goes with a newer page: this one was kept open / cached — ask once for a reload
+        if (m.cv && parseFloat(m.cv) > parseFloat(PAGE_VERSION) && !L.toldOld) {
+          L.toldOld = true;
+          setTimeout(() => toast('새 버전이 나왔어요. 새로고침하면 다른 스케이터와 모든 동작을 함께할 수 있어요.'), 1500);
+        }
         L.id = m.id; L.players = m.players || 1; L.max = m.max || L.max;
         if (!L.spawned && L.mode === 'loading' && playerSetup && playerSetup.open && !TEST_NPC) { L.spawned = true; spawnAtRandom(); }   // (Phase 5; ?testnpc=1 keeps the fixed start next to the test NPC)
         online();
@@ -6498,7 +6506,7 @@ const RINK_LINK = (() => {
     if (resync && now - L.lastJoin < 2000) return;   // (at most every 2 s)
     L.lastJoin = now;
     const s = selfState();
-    send({ t: 'join', nick: P.nickname, style: P.style, color: P.color, x: s.x, z: s.z, h: s.h });
+    send({ t: 'join', nick: P.nickname, style: P.style, color: P.color, x: s.x, z: s.z, h: s.h, ia: PAGE_IA, cv: PAGE_VERSION });   // (7.3)
   }
   function leftRink() { L.joined = false; interactions.clear(); remotePlayers.clear(); }
   // once per frame: own movement (only while it changes, and only if someone else is there to see it)
@@ -7146,7 +7154,20 @@ const interactions = (() => {
   popRow.append(mkBtn('수락', true), mkBtn('거절', false));
   pop.append(popText, popRow);
   document.body.appendChild(pop);
-  const closePop = () => { if (inc) clearTimeout(inc.timer); inc = null; pop.style.display = 'none'; };
+  // (Phase 7.3) after 수락 / 거절 the popup fades out (0.6 s) and takes no more taps meanwhile; other closes stay instant
+  let popFade = 0;
+  const popReset = () => { clearTimeout(popFade); pop.style.transition = ''; pop.style.opacity = '1'; pop.style.pointerEvents = ''; };
+  const closePop = (fade = false) => {
+    if (inc) clearTimeout(inc.timer);
+    inc = null;
+    if (!fade || pop.style.display === 'none') { popReset(); pop.style.display = 'none'; return; }
+    clearTimeout(popFade);
+    pop.style.pointerEvents = 'none';                                  // (no second tap while it fades)
+    pop.style.transition = 'opacity .6s ease';
+    void pop.offsetWidth;
+    pop.style.opacity = '0';
+    popFade = setTimeout(() => { pop.style.display = 'none'; popReset(); }, 650);
+  };
 
   // ---------- requests ----------
   function request(to, k) {
@@ -7165,7 +7186,7 @@ const interactions = (() => {
     if (!inc) return;
     if (ok && localBusy()) { toast('동작이 끝난 뒤에 수락할 수 있어요.'); return; }
     send({ t: 'ires', rid: inc.rid, ok });
-    closePop();
+    closePop(true);                                                   // (fades out; inc is cleared at once → no double answer)
   }
   function release() {
     const p = own();
@@ -7703,6 +7724,8 @@ const interactions = (() => {
         out = null; showPill();
         const nm = nickOf(m.to), what = label(m.k);
         if (m.reason === 'pending') toast('이미 보낸 요청이 있어요.');
+        else if (m.reason === 'version') toast(`${nm}님의 화면이 이전 버전이라 ${what}를 함께할 수 없어요. 새로고침하면 함께할 수 있어요.`, 4);
+        else if (m.reason === 'version-self') toast(`이 화면이 이전 버전이에요. 새로고침하면 ${what}를 함께할 수 있어요.`, 4);
         else if (m.reason === 'busy-self' || m.reason === 'wait') toast(`지금은 ${what}를 요청할 수 없어요.`);
         else if (m.reason === 'far') toast(`${nm}님에게 조금 더 가까이 가 주세요.`);
         else toast(`${nm}님은 지금 ${what}를 할 수 없어요.`);
@@ -7712,6 +7735,7 @@ const interactions = (() => {
         if (inc) clearTimeout(inc.timer);
         inc = { rid: m.rid, from: m.from, nick: m.nick, k: m.k, timer: setTimeout(() => { closePop(); toast(`${m.nick}님의 요청이 만료되었어요.`); }, m.ttl) };
         popText.textContent = `${m.nick}님이 ${label(m.k)}를 요청하였습니다.`;
+        popReset();                                                     // (a new request while the last one still fades)
         pop.style.display = 'block';
         break;
       case 'ireq-gone':
