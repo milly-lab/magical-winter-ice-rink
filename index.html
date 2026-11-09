@@ -11,6 +11,24 @@
         -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
         -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
       #app, canvas { display: block; width: 100%; height: 100%; }
+      /* (cinematic / 촬영 모드, 2026-11-09) only active with html.cine-on: game UI hidden, 9:16 frame on black, filming controls */
+      html.cine-on, html.cine-on body { background: #000; }
+      html.cine-on body > *:not(#app):not(#cine-shell):not(#rink-loading):not(#rink-diag) { visibility: hidden !important; }
+      #cine-shell { position: fixed; inset: 0; z-index: 30; display: flex; align-items: flex-end; justify-content: center;
+        padding-bottom: calc(18px + env(safe-area-inset-bottom)); cursor: default; }
+      #cine-shell.cine-idle { cursor: none; }
+      #cine-shell .cine-panel { display: flex; flex-direction: column; gap: 8px; min-width: 260px; padding: 12px 14px; border-radius: 18px;
+        background: rgba(6,12,26,.72); border: 1px solid rgba(243,217,184,.35); color: #f0f6fc; letter-spacing: 0; transition: opacity .35s;
+        font: 600 13px/1.3 "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; }
+      #cine-shell.cine-idle .cine-panel { opacity: 0; pointer-events: none; }
+      #cine-shell.cine-side.cine-idle .cine-panel { opacity: .35; pointer-events: auto; }   /* (beside the frame: stays findable) */
+      #cine-shell .cine-info { display: flex; justify-content: space-between; gap: 12px; opacity: .85; }
+      #cine-shell .cine-time { font-variant-numeric: tabular-nums; }
+      #cine-shell .cine-bar { height: 3px; border-radius: 2px; background: rgba(240,246,252,.18); overflow: hidden; }
+      #cine-shell .cine-fill { height: 100%; background: #f3d9b8; transform-origin: 0 50%; transform: scaleX(0); }
+      #cine-shell .cine-row { display: flex; gap: 8px; justify-content: center; }
+      #cine-shell .cine-btn { min-height: 40px; padding: 0 16px; border-radius: 999px; border: 1px solid rgba(243,217,184,.6);
+        background: rgba(255,255,255,.06); color: #f0f6fc; font: inherit; letter-spacing: 0; cursor: pointer; }
       button, input { touch-action: manipulation; }
       .hud-pop { touch-action: pan-y; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
       /* bottom action buttons: 13px on desktop, a little smaller on phones so all three fit on one line */
@@ -6873,6 +6891,12 @@ const RINK_LINK = (() => {
 
   return {
     start() { connect(); },
+    pause() {                                                        // (촬영 모드) go offline quietly; true = was in / joining the shared rink
+      const was = L.mode === 'online' || L.mode === 'offline-retry';
+      if (L.pending) { L.pending(false); L.pending = null; }
+      if (was) offline();
+      return was;
+    },
     profileReady() { sendJoin(); },                                   // (Phase 5) setup screen done
     tick, act, actEnd,                                                // (Phase 6) own moves
     send,                                                             // (Phase 7) interaction messages
@@ -6950,6 +6974,7 @@ const playerFill = addSoftFill(player.mesh, LIGHTING.characterFill);
 // no input, no collision. Natural relaxed standing pose = the original skater's idle pose; she stands a few
 // metres ahead and to the right of the player's starting spot, turned toward the player.
 const TEST_NPC = new URLSearchParams(location.search).get('testnpc') === '1';
+const CINEMATIC_URL = new URLSearchParams(location.search).get('cinematic') === '1';   // (촬영 모드) ?cinematic=1: local only, never connects
 const skater2 = (() => {
   const R = buildSkater({ style: 'girl' }), Lg = R.L;
   for (const [leg, side] of [[R.legL, 1], [R.legR, -1]]) {
@@ -7312,7 +7337,7 @@ controls.onTap = (ray) => partner.handleTap(ray);
 // ---- white rose collection + Ask Out proposal (2026-11-03) ---------------------------------------------
 const topHud = createTopHud({ toast: (text, sec) => STORY_UI.toast(text, sec) });   // top-left rooms, top-right volume
 STORY_UI.mount(topHud.right);                                                        // rose counter: top-right, after the volume
-RINK_LINK.start();                                   // (2026-11-05) multiplayer server: connect / enter the room (loading screen)
+if (!CINEMATIC_URL) RINK_LINK.start();               // (2026-11-05) multiplayer server: connect / enter the room (loading screen); (촬영 모드 URL: never)
 const pillStyle = partner.pillStyle;
 const roseCollector = new RoseCollector({
   roses: world.roses, scene, camera, dom: renderer.domElement, pillStyle,
@@ -8228,7 +8253,8 @@ const rt = new THREE.WebGLRenderTarget(buf.x, buf.y, {
   type: FLOAT_RT_OK ? THREE.HalfFloatType : THREE.UnsignedByteType, samples: IS_MOBILE ? 0 : 4,
 });
 const composer = new EffectComposer(renderer, rt);
-composer.addPass(new RenderPass(scene, camera));
+const renderPass = new RenderPass(scene, camera);   // (촬영 모드 swaps its camera while filming)
+composer.addPass(renderPass);
 const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), LIGHTING.bloom.strength, LIGHTING.bloom.radius, LIGHTING.bloom.threshold);
 composer.addPass(bloom);
 composer.addPass(new OutputPass());
@@ -8276,7 +8302,7 @@ function renderFrame(dt) {
       }
     } catch (e) { useDirectRendering(e.message); }
   }
-  if (RENDER.mode === 'direct') renderer.render(scene, camera);
+  if (RENDER.mode === 'direct') renderer.render(scene, CINEMA.active ? CINEMA.camera : camera);
   if (RENDER.firstFrame) {
     RENDER.firstFrame = false;
     DIAG.started = true; DIAG.hide();
@@ -8289,6 +8315,7 @@ function renderFrame(dt) {
 }
 
 function onResize() {
+  if (CINEMA.active) { CINEMA.layout(); return; }                  // (촬영 모드: 9:16 frame; the game sizes return on exit)
   const w = window.innerWidth, h = window.innerHeight;
   camera.aspect = w / h;
   fitCameraFov(camera.aspect);
@@ -8317,6 +8344,321 @@ if (window.visualViewport) window.visualViewport.addEventListener('resize', onRe
 // exactly as before, so their look is unchanged.
 const SIM_STEP = 1 / 240, MAX_CATCH_UP = 0.25;
 let simAcc = 0;
+
+// ===== cinematic/director.js (촬영 모드 · Cinematic Director Mode, Phase 1) =====
+// A filming mode that is completely separate from the game (2026-11-09). It is LOCAL ONLY:
+//  - entered with ?cinematic=1 in the address (the page then never connects to the multiplayer server), or with the
+//    C key during normal play (the page first leaves the shared rink cleanly — RINK_LINK.pause — and goes back in when
+//    the filming mode ends, exactly like the HUD "reconnect"). Nothing is ever sent to the server while filming.
+//  - Esc leaves it: from the C key → back to the game in place (camera, sizes, pixel ratio, input, visibility restored);
+//    from ?cinematic=1 → the same address without the option (a normal start: loading screen → server → setup).
+//  - while it runs the game simulation is paused (own skater frozen + hidden, no input, no sends); the world (snow,
+//    lights, tree, sky) keeps animating and is drawn through a separate shot camera into a 9:16 frame (1080 × 1920 on
+//    desktop; on phones the same light pixel ratio as the game). The game camera is never touched.
+//  - all game UI is hidden (CSS class on <html>); the filming controls fade out while a shot plays.
+// Nothing here runs unless the mode is active: the loop only reads CINEMA.active, the shot camera / DOM are made on entry.
+//
+// Timeline: a shot = { name, duration, blendIn?, sample(localT, out, globalT) } → out = { pos, look, fov }.
+// A timeline plays shots back to back (an optional blendIn eases from the previous shot's last pose). Shot builders:
+//   cineOrbit  — circle a centre (angle / radius / height / fov ranges, eased: accelerates and decelerates)
+//   cinePath   — keyframed camera path (Catmull-Rom through positions and look points, eased time, fov keys)
+//   cineTrack  — follow a target given as a function of time (deterministic, so the timeline can be scrubbed)
+// Phase 1 has only a short test orbit around the whole rink. Later phases add scenes (three ~30 s scenes are planned)
+// and local stand-in skaters through CINEMA.cast (own group, removed on exit; never the real players).
+const CINE_EASE = {
+  linear: (x) => x,
+  inOutCubic: (x) => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2),
+  smoother: (x) => x * x * x * (x * (x * 6 - 15) + 10),                 // smootherstep: zero speed and acceleration at both ends
+  outCubic: (x) => 1 - Math.pow(1 - x, 3),
+  inCubic: (x) => x * x * x,
+};
+const cineClamp01 = (x) => Math.min(1, Math.max(0, x));
+const cineMix = (a, b, k) => a + (b - a) * k;
+const cineRange = (r, k) => (Array.isArray(r) ? cineMix(r[0], r[1], k) : r);
+
+function cineOrbit({ name = 'orbit', duration, center = [0, 0, 0], look = null, angle, radius, height, fov = 50, ease = 'smoother', blendIn = 0 }) {
+  const E = CINE_EASE[ease] || CINE_EASE.smoother;
+  const c = new THREE.Vector3(...center), lk = new THREE.Vector3(...(look || center));
+  return {
+    name, duration, blendIn,
+    sample(t, out) {
+      const k = E(cineClamp01(t / duration));
+      const a = THREE.MathUtils.degToRad(cineRange(angle, k)), r = cineRange(radius, k);
+      out.pos.set(c.x + Math.sin(a) * r, c.y + cineRange(height, k), c.z + Math.cos(a) * r);
+      out.look.copy(lk);
+      out.fov = cineRange(fov, k);
+    },
+  };
+}
+function cinePath({ name = 'path', duration, keys, ease = 'smoother', blendIn = 0 }) {
+  const E = CINE_EASE[ease] || CINE_EASE.smoother;
+  const posCurve = new THREE.CatmullRomCurve3(keys.map((q) => new THREE.Vector3(...q.pos)), false, 'centripetal');
+  const lookCurve = new THREE.CatmullRomCurve3(keys.map((q) => new THREE.Vector3(...q.look)), false, 'centripetal');
+  const fovs = keys.map((q) => q.fov ?? 50);
+  return {
+    name, duration, blendIn,
+    sample(t, out) {
+      const k = E(cineClamp01(t / duration));
+      posCurve.getPoint(k, out.pos);
+      lookCurve.getPoint(k, out.look);
+      const f = k * (fovs.length - 1), i = Math.min(fovs.length - 2, Math.floor(f));
+      out.fov = fovs.length > 1 ? cineMix(fovs[i], fovs[i + 1], CINE_EASE.smoother(f - i)) : fovs[0];
+    },
+  };
+}
+function cineTrack({ name = 'track', duration, target, offset = [0, 1.6, -4], lookOffset = [0, 1, 0], fov = 50, blendIn = 0 }) {
+  const tgt = new THREE.Vector3();
+  return {
+    name, duration, blendIn,
+    sample(t, out, globalT) {
+      target(globalT, tgt);                                             // (target(t, out): where the subject is at time t)
+      out.pos.set(tgt.x + offset[0], tgt.y + offset[1], tgt.z + offset[2]);
+      out.look.set(tgt.x + lookOffset[0], tgt.y + lookOffset[1], tgt.z + lookOffset[2]);
+      out.fov = typeof fov === 'function' ? fov(t) : fov;
+    },
+  };
+}
+class CineTimeline {
+  constructor(shots) {
+    this.shots = shots;
+    let at = 0;
+    this.starts = shots.map((s) => { const s0 = at; at += s.duration; return s0; });
+    this.duration = at;
+    this._a = { pos: new THREE.Vector3(), look: new THREE.Vector3(), fov: 50 };
+  }
+  sample(t, out) {
+    const T = Math.min(Math.max(0, t), this.duration);
+    let i = this.shots.length - 1;
+    while (i > 0 && T < this.starts[i]) i--;
+    const s = this.shots[i], local = T - this.starts[i];
+    s.sample(local, out, T);
+    if (i > 0 && s.blendIn > 0 && local < s.blendIn) {                  // ease in from the previous shot's last pose
+      const p = this.shots[i - 1], a = this._a;
+      p.sample(p.duration, a, this.starts[i]);
+      const k = CINE_EASE.smoother(local / s.blendIn);
+      out.pos.lerpVectors(a.pos, out.pos, k);
+      out.look.lerpVectors(a.look, out.look, k);
+      out.fov = cineMix(a.fov, out.fov, k);
+    }
+    return s;
+  }
+}
+
+// scenes (Phase 1: test orbit only). The centre of the rink is the tree island; the tree is 19.4 m tall.
+const CINE_SCENES = {
+  test: () => [
+    // a slow half circle around the whole rink: starts low and close at the front, rises and pulls back while it turns,
+    // a slight zoom-out — eased in and out (no constant-speed 360° spin)
+    cineOrbit({ name: 'test-orbit', duration: 12, center: [0, 0, 0], look: [0, 8.0, 0],
+      angle: [-25, 155], radius: [36, 42], height: [2.2, 7.0], fov: [50, 52], ease: 'smoother' }),
+  ],
+};
+
+const CINEMA = (() => {
+  const W = 1080, H = 1920, ASPECT = W / H;                             // 9:16 reference frame
+  const S = {
+    active: false, fromUrl: false, playing: false, time: 0, timeline: null,
+    cam: null, shell: null, panel: null, ui: {}, idle: 0, savedPr: 1, wasOnline: false, playerVisible: true,
+    pose: { pos: null, look: null, fov: 50 },
+  };
+  // local stand-ins for later phases: everything filmed-only lives in its own group and is removed on exit
+  const cast = {
+    group: null,
+    add(obj, dispose = null) { if (!this.group) return obj; obj.userData.cineDispose = dispose; this.group.add(obj); return obj; },
+    clear() {
+      if (!this.group) return;
+      for (const o of [...this.group.children]) { this.group.remove(o); try { if (o.userData.cineDispose) o.userData.cineDispose(o); } catch (e) { /* ignore */ } }
+    },
+  };
+  const silent = { velocity: { x: 0, z: 0 }, mesh: { position: { y: 0 } }, bounds: { iceY: 0 } };   // (skating sound: none while filming)
+
+  function ensure() {
+    if (S.cam) return;
+    S.cam = new THREE.PerspectiveCamera(50, ASPECT, 0.1, 1200);
+    S.cam.layers.enable(EXTERIOR_LAYER);                                 // exterior scenery, like the game camera
+    S.pose.pos = new THREE.Vector3(); S.pose.look = new THREE.Vector3();
+    cast.group = new THREE.Group(); cast.group.name = 'CinematicCast';
+    // ---- filming controls (outside the shot: fade out while it plays; Space · R · H · Esc on the keyboard) ----
+    const shell = S.shell = document.createElement('div');
+    shell.id = 'cine-shell';
+    const panel = S.panel = document.createElement('div');
+    panel.className = 'cine-panel';
+    const mk = (label, fn) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.className = 'cine-btn'; b.textContent = label;
+      b.addEventListener('click', (e) => { e.stopPropagation(); fn(); b.blur(); });
+      return b;
+    };
+    S.ui.play = mk('재생', () => toggle());
+    S.ui.restart = mk('처음부터', () => restart());
+    S.ui.exit = mk('종료', () => exit());
+    const info = document.createElement('div');
+    info.className = 'cine-info';
+    S.ui.title = document.createElement('span'); S.ui.title.textContent = '촬영 모드 · 9:16';
+    S.ui.time = document.createElement('span'); S.ui.time.className = 'cine-time';
+    info.append(S.ui.title, S.ui.time);
+    const bar = document.createElement('div'); bar.className = 'cine-bar';
+    S.ui.fill = document.createElement('div'); S.ui.fill.className = 'cine-fill';
+    bar.appendChild(S.ui.fill);
+    const row = document.createElement('div'); row.className = 'cine-row';
+    row.append(S.ui.play, S.ui.restart, S.ui.exit);
+    panel.append(info, bar, row);
+    shell.appendChild(panel);
+    shell.addEventListener('pointerdown', () => wake());
+    shell.addEventListener('pointermove', () => wake());
+    document.body.appendChild(shell);
+  }
+  function wake() { S.idle = 0; if (S.shell) S.shell.classList.remove('cine-idle'); }
+  function syncUi() {
+    if (!S.shell) return;
+    S.ui.play.textContent = S.playing ? '일시정지' : '재생';
+    const d = S.timeline ? S.timeline.duration : 0;
+    S.ui.time.textContent = `${S.time.toFixed(1)}초 / ${d.toFixed(1)}초`;
+    S.ui.fill.style.transform = `scaleX(${d ? Math.min(1, S.time / d) : 0})`;
+  }
+
+  // ---- 9:16 frame: centred, letterboxed; desktop renders the full 1080 × 1920, phones keep the game's pixel ratio ----
+  function layout() {
+    const vw = window.innerWidth, vh = window.innerHeight, pad = IS_MOBILE ? 0 : 16;
+    let h = Math.max(1, vh - 2 * pad), w = h * ASPECT;
+    if (w > vw - 2 * pad) { w = Math.max(1, vw - 2 * pad); h = w / ASPECT; }
+    w = Math.floor(w); h = Math.floor(h);
+    const pr = IS_MOBILE ? S.savedPr : 1, bw = IS_MOBILE ? w : W, bh = IS_MOBILE ? h : H;
+    renderer.setPixelRatio(pr);
+    renderer.setSize(bw, bh, false);
+    if (RENDER.mode === 'composer') { composer.setPixelRatio(pr); composer.setSize(bw, bh); bloom.resolution.set(bw, bh); }
+    const cs = renderer.domElement.style;
+    cs.position = 'absolute'; cs.left = `${Math.round((vw - w) / 2)}px`; cs.top = `${Math.round((vh - h) / 2)}px`;
+    cs.width = `${w}px`; cs.height = `${h}px`;
+    const b = renderer.getDrawingBufferSize(new THREE.Vector2());
+    world.setSize(b.x, b.y, Math.max(S.savedPr, b.y / 1080));          // (stars: same look as a 1080-tall game screen)
+    skateFx.setViewportHeight(b.y); skateFx2.setViewportHeight(b.y); roseCollector.setViewportHeight(b.y);
+    S.cam.aspect = ASPECT;
+    S.cam.updateProjectionMatrix();
+    // controls: in the side margin when the window is wide enough (never over the shot); otherwise at the bottom, over the
+    // frame, fading out while the shot plays
+    const ps = S.panel.style, room = (vw - w) / 2 - 32;
+    if (room >= 280) {
+      ps.position = 'absolute'; ps.left = `${Math.round((vw + w) / 2) + 16}px`; ps.bottom = `${Math.round((vh - h) / 2)}px`;
+      ps.minWidth = `${Math.min(300, Math.floor(room))}px`; S.shell.classList.add('cine-side');
+    } else {
+      ps.position = ps.left = ps.bottom = ps.minWidth = ''; S.shell.classList.remove('cine-side');
+    }
+  }
+
+  function enter({ fromUrl = false } = {}) {
+    if (S.active) return;
+    ensure();
+    S.active = true; S.fromUrl = fromUrl;
+    S.wasOnline = fromUrl ? false : RINK_LINK.pause();                  // leave the shared rink (nothing is sent while filming)
+    S.playerVisible = player.mesh.visible;
+    player.mesh.visible = false;                                         // (later: local stand-in skaters through CINEMA.cast)
+    player.keys.clear();
+    scene.add(cast.group);
+    S.savedPr = renderer.getPixelRatio();
+    document.documentElement.classList.add('cine-on');
+    S.shell.style.display = '';
+    renderPass.camera = S.cam;
+    layout();
+    S.timeline = new CineTimeline(CINE_SCENES.test());
+    S.time = 0; S.playing = false;                                       // first frame shown, waiting for 재생 (start the recorder first)
+    pose();
+    wake(); syncUi();
+    if (fromUrl) hideLoading();
+  }
+  function exit() {
+    if (!S.active) return;
+    if (S.fromUrl) {                                                     // never connected: start the game normally
+      const u = new URL(location.href);
+      u.searchParams.delete('cinematic');
+      location.replace(u.toString());
+      return;
+    }
+    S.active = false; S.playing = false;
+    cast.clear();
+    scene.remove(cast.group);
+    renderPass.camera = camera;
+    document.documentElement.classList.remove('cine-on');
+    S.shell.style.display = 'none';
+    const cs = renderer.domElement.style;
+    cs.position = cs.left = cs.top = '';
+    renderer.setPixelRatio(S.savedPr);
+    if (RENDER.mode === 'composer') composer.setPixelRatio(S.savedPr);
+    onResize();                                                          // the game's own sizes, camera aspect and fov again
+    player.mesh.visible = S.playerVisible;
+    player.keys.clear();
+    if (S.wasOnline && ROOM_SERVICE.join) ROOM_SERVICE.join();          // back into the shared rink (as after the HUD reconnect)
+  }
+  function hideLoading() {
+    const el = document.getElementById('rink-loading');
+    if (!el) return;
+    const done = () => {
+      if (!(window.__rinkDiag && window.__rinkDiag.started)) { requestAnimationFrame(done); return; }
+      el.classList.add('ld-out');
+      setTimeout(() => { el.style.display = 'none'; }, 650);
+    };
+    done();
+  }
+  function pose() {
+    S.timeline.sample(S.time, S.pose);
+    S.cam.position.copy(S.pose.pos);
+    S.cam.lookAt(S.pose.look);
+    if (S.cam.fov !== S.pose.fov) { S.cam.fov = S.pose.fov; S.cam.updateProjectionMatrix(); }
+  }
+  function toggle() {
+    if (!S.playing && S.time >= S.timeline.duration) S.time = 0;        // (at the end: play again from the start)
+    S.playing = !S.playing; wake(); syncUi();
+  }
+  function restart() { S.time = 0; S.playing = true; pose(); wake(); syncUi(); }
+  // once per rendered frame, instead of the game simulation
+  function frame(dt, t) {
+    if (S.playing) {
+      S.time = Math.min(S.timeline.duration, S.time + Math.min(dt, MAX_CATCH_UP));
+      if (S.time >= S.timeline.duration) { S.playing = false; wake(); }
+      S.idle += dt;
+      if (S.idle > 2 && !S.shell.classList.contains('cine-idle')) S.shell.classList.add('cine-idle');
+    }
+    pose();
+    syncUi();
+    world.update(t);
+  }
+
+  // keyboard: C enters from the game; while filming every key is kept from the game (key releases still pass through)
+  addEventListener('keydown', (e) => {
+    if (!S.active) {
+      if (e.code !== 'KeyC' || e.repeat || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+      const el = document.activeElement, tag = el && el.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (el && el.isContentEditable)) return;
+      if (RINK_LINK.mode === 'loading' || playerSetup.open) return;   // (not before the rink has been entered)
+      const me = RINK_LINK.id;
+      const paired = [...interactions.pairs.values()].some((P) => !P.ending && (P.lead === me || P.follow === me));
+      if (player.trick || player.spin || player.routine || proposal.active || partner.mode || paired || interactions.pending || interactions.incoming) {
+        try { STORY_UI.toast('동작이나 상호작용이 끝난 뒤 촬영 모드로 들어갈 수 있어요.', 3); } catch (err) { /* ignore */ }
+        return;
+      }
+      e.preventDefault(); e.stopImmediatePropagation();
+      enter();
+      return;
+    }
+    e.preventDefault(); e.stopImmediatePropagation();
+    wake();
+    if (e.repeat) return;
+    if (e.code === 'Escape') exit();
+    else if (e.code === 'Space') toggle();
+    else if (e.code === 'KeyR') restart();
+    else if (e.code === 'KeyH') S.shell.classList.toggle('cine-idle');
+  }, true);
+
+  return {
+    enter, exit, frame, layout, cast, scenes: CINE_SCENES,
+    seek(t) { if (!S.timeline) return; S.time = Math.min(S.timeline.duration, Math.max(0, t)); pose(); syncUi(); },
+    get active() { return S.active; },
+    get camera() { return S.cam; },
+    get silentSkater() { return silent; },
+    get state() { return { playing: S.playing, time: S.time, duration: S.timeline ? S.timeline.duration : 0, fromUrl: S.fromUrl }; },
+  };
+})();
+
 // ===== camera/pov.js (POV: 1인칭 / 3인칭) =====
 // The 3rd-person FollowCamera keeps running every frame exactly as before; first person is laid ON TOP of it: the
 // camera is blended (0.6 s, eased) from the follow camera's pose to the skater's eyes.
@@ -8483,10 +8825,13 @@ renderer.setAnimationLoop((now) => {
   last = now;
   const t = (now - start) / 1000;
   updateFps(realDt);
-  simulate(realDt, t);
-  SkateSound.update(player);                                       // (Phase 7.5) blades on the ice: loudness follows his speed
+  if (CINEMA.active) CINEMA.frame(realDt, t);                      // (촬영 모드) shot camera + world only; the game is paused
+  else simulate(realDt, t);
+  SkateSound.update(CINEMA.active ? CINEMA.silentSkater : player);                                       // (Phase 7.5) blades on the ice: loudness follows his speed
   renderFrame(Math.min(realDt, MAX_CATCH_UP));
 });
+
+if (CINEMATIC_URL) CINEMA.enter({ fromUrl: true });                 // (촬영 모드) started from the address
 
 // ?debug=1: a small status line for checking on a phone (render path, pixel ratio, buffer size, errors)
 if (DIAG.debug) {
