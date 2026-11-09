@@ -8319,18 +8319,24 @@ const SIM_STEP = 1 / 240, MAX_CATCH_UP = 0.25;
 let simAcc = 0;
 // ===== camera/pov.js (POV: 1인칭 / 3인칭) =====
 // The 3rd-person FollowCamera keeps running every frame exactly as before; first person is laid ON TOP of it: the
-// camera is blended (0.6 s, eased) from the follow camera's pose to the skater's eyes — his head joint (so it rises,
-// dips and leans with every pose / animation), looking where he faces (his heading; a spin or a jump turn, which
-// only turns the body for a moment, does not whirl the view), slightly down at the ice ahead. His own body is hidden while the camera is at
+// camera is blended (0.6 s, eased) from the follow camera's pose to the skater's eyes.
+// (POV v2) The skater has no animation mixer: his joints are a group chain root → body → pelvis → torso → neck → head
+// whose rotations the code sets every simulation step (spins / jump turns turn the root, jumps lift it, an Ina Bauer
+// bends torso / neck / head). After ALL of that for the frame, the camera takes the head joint's full WORLD transform
+// — position AND rotation, everything above it accumulated — so it spins at exactly his angular speed, rises and
+// turns in the air, and tips back to the sky in an Ina Bauer. No smoothing, no limits. His own body is hidden while the camera is at
 // his eyes (only on this screen: other players see him as always). Back in 3rd person the blend runs the other way
 // onto the follow camera, which never stopped — same distance, angle and orbit as before. Orbit / zoom drags are
 // ignored while in first person (they would silently change the 3rd-person view). Cinematic moments (the
 // confession) always use their own 3rd-person camera. Only the local camera changes: nothing is sent to the server.
 const POV = (() => {
-  let mode = 'third', k = 0, yaw = 0, hidden = false;
+  let mode = 'third', k = 0, hidden = false;
   const BLEND = 0.6;                                     // s, one way
-  const eye = new THREE.Vector3(), look = new THREE.Vector3(), m = new THREE.Matrix4();
-  const qTo = new THREE.Quaternion(), qFrom = new THREE.Quaternion();
+  // the eyes in the head joint's own frame (the head faces +z, up +y): a little up and forward, inside the head
+  const EYE = new THREE.Vector3(0, 0.06, 0.12);
+  // a camera looks down its −z: turn it to the head's +z, tipped 4° down (the eyes' natural line, fixed in the head)
+  const LOOK = new THREE.Quaternion().setFromEuler(new THREE.Euler(THREE.MathUtils.degToRad(4), Math.PI, 0, 'YXZ'));
+  const eye = new THREE.Vector3(), qTo = new THREE.Quaternion();
   const subs = new Set();
   const setHidden = (h) => { if (h === hidden) return; hidden = h; player.mesh.visible = !h; };
   function apply(dt) {
@@ -8339,15 +8345,11 @@ const POV = (() => {
     k = want ? Math.min(1, k + dt / BLEND) : Math.max(0, k - dt / BLEND);
     cine.locked = mode === 'first';
     if (k <= 0) { setHidden(false); return; }
-    // the eyes: a little above the head joint and in front of it, facing his heading
-    yaw = player.heading;                                 // (his heading is already smooth: no extra lag)
-    player.rig.head.getWorldPosition(eye);
-    const fx = Math.sin(yaw), fz = Math.cos(yaw);
-    eye.x += fx * 0.12; eye.y += 0.06; eye.z += fz * 0.12;
-    look.set(eye.x + fx * 10, eye.y - 0.7, eye.z + fz * 10);   // ≈ 4° down: the ice ahead in view
-    const e = k * k * (3 - 2 * k);                        // eased blend
-    qFrom.copy(camera.quaternion);                        // = the follow camera this frame
-    m.lookAt(eye, look, camera.up); qTo.setFromRotationMatrix(m);
+    const head = player.rig.head;
+    head.updateWorldMatrix(true, false);                  // this frame's pose, all joints above included
+    eye.copy(EYE).applyMatrix4(head.matrixWorld);
+    head.getWorldQuaternion(qTo).multiply(LOOK);
+    const e = k * k * (3 - 2 * k);                        // eased blend (only while switching)
     camera.position.lerp(eye, e);
     camera.quaternion.slerp(qTo, e);
     setHidden(e > 0.8);                                   // the camera is at / inside his head: hide him (only here)
@@ -8408,7 +8410,6 @@ function simulate(frameDt, t) {
     if (proposal.cameraTarget) cine.update(dt, proposal.cameraTarget, cine.yaw);   // free camera, aimed at the couple
     else if (interactions.cameraTarget) cine.update(dt, interactions.cameraTarget, cine.yaw);   // (Phase 8: a real confession)
     else cine.update(dt, player.position, player.heading);
-    POV.apply(dt);                                             // (POV) first person on top of the follow camera
     controls.update(dt);
     roseCollector.update(dt);
     skateFx.update(dt);
@@ -8416,6 +8417,7 @@ function simulate(frameDt, t) {
     if (remoteFixture) remoteFixture.step(dt);                 // (dev-only ?testremotes=N)
     remotePlayers.step(dt);                                    // (Phase 5) real players: smoothed network positions
     interactions.update(dt);                                   // (Phase 7) followers beside their leaders · menu
+    POV.apply(dt);                                             // (POV) first person: his head after every pose this frame
     remoteSkaters.update(dt);                                  // (Phase 4) other players: once per frame, after the camera
     interactions.hands();                                      // (Phase 7) the holding hands meet (after all poses)
   }
