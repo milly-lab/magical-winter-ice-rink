@@ -2502,7 +2502,7 @@ class FollowCamera {
   }
 
   rotate(dYaw, dPitch) {
-    if (this.locked) return;                       // (POV) first person: the 3rd-person view is kept exactly as it was
+    if (this.locked) { if (this.lockedRotate) this.lockedRotate(dYaw, dPitch); return; }   // (POV) 1st person: its own look-around; the 3rd-person view is kept as it was
     this.orbitYaw += dYaw;
     this.pitch = THREE.MathUtils.clamp(this.pitch + dPitch, this.minPitch, this.maxPitch);
   }
@@ -8324,19 +8324,34 @@ let simAcc = 0;
 // whose rotations the code sets every simulation step (spins / jump turns turn the root, jumps lift it, an Ina Bauer
 // bends torso / neck / head). After ALL of that for the frame, the camera takes the head joint's full WORLD transform
 // — position AND rotation, everything above it accumulated — so it spins at exactly his angular speed, rises and
-// turns in the air, and tips back to the sky in an Ina Bauer. No smoothing, no limits. His own body is hidden while the camera is at
+// turns in the air, and tips back to the sky in an Ina Bauer. No smoothing, no limits.
+// (POV v3) …but only in ACTIONS (spin, Triple Axel, routine incl. Ina Bauer, a dance). In plain skating the head's
+// side-to-side sway is not wanted: the camera then sits steady at his eye height above his body, looking along his
+// heading (forward / backward / turning still move it). Plain ⇄ action blends over ≈0.35 / 0.5 s, so the camera eases
+// into the head at an action's start and back to the steady view after it. On top of both: the player's own
+// look-around (drag, mouse or finger; yaw free, up / down within ±70°) — only this camera; his heading, movement and
+// what is sent to the server do not change. His own body is hidden while the camera is at
 // his eyes (only on this screen: other players see him as always). Back in 3rd person the blend runs the other way
 // onto the follow camera, which never stopped — same distance, angle and orbit as before. Orbit / zoom drags are
 // ignored while in first person (they would silently change the 3rd-person view). Cinematic moments (the
 // confession) always use their own 3rd-person camera. Only the local camera changes: nothing is sent to the server.
 const POV = (() => {
-  let mode = 'third', k = 0, hidden = false;
+  let mode = 'third', k = 0, hidden = false, w = 0, lookYaw = 0, lookPitch = 0;
   const BLEND = 0.6;                                     // s, one way
+  const PITCH_LIM = THREE.MathUtils.degToRad(70);
   // the eyes in the head joint's own frame (the head faces +z, up +y): a little up and forward, inside the head
   const EYE = new THREE.Vector3(0, 0.06, 0.12);
-  // a camera looks down its −z: turn it to the head's +z, tipped 4° down (the eyes' natural line, fixed in the head)
-  const LOOK = new THREE.Quaternion().setFromEuler(new THREE.Euler(THREE.MathUtils.degToRad(4), Math.PI, 0, 'YXZ'));
-  const eye = new THREE.Vector3(), qTo = new THREE.Quaternion();
+  // a camera looks down its −z: turn it to the head's +z, tipped 4° down (the eyes' natural line, fixed in the head),
+  // plus the player's look-around (v3: the sign of the 4° fixed — +x tips a camera UP, so down is −4°)
+  const DOWN = THREE.MathUtils.degToRad(-4), Y = new THREE.Vector3(0, 1, 0);
+  const LOOK = new THREE.Quaternion(), lookE = new THREE.Euler(0, 0, 0, 'YXZ');
+  const eye = new THREE.Vector3(), eyeHead = new THREE.Vector3(), qTo = new THREE.Quaternion(), qHead = new THREE.Quaternion();
+  const myDance = () => { if (partner.mode === 'dance') return true; for (const P of interactions.pairs.values()) if (P.k === 'dance' && (P.lead === RINK_LINK.id || P.follow === RINK_LINK.id)) return true; return false; };
+  const inAction = () => !!(player.trick || player.spin || player.routine) || myDance();
+  cine.lockedRotate = (dYaw, dPitch) => {                // the same drag that orbits the 3rd-person camera
+    lookYaw += dYaw;
+    lookPitch = THREE.MathUtils.clamp(lookPitch - dPitch, -PITCH_LIM - DOWN, PITCH_LIM - DOWN);
+  };
   const subs = new Set();
   const setHidden = (h) => { if (h === hidden) return; hidden = h; player.mesh.visible = !h; };
   function apply(dt) {
@@ -8347,8 +8362,17 @@ const POV = (() => {
     if (k <= 0) { setHidden(false); return; }
     const head = player.rig.head;
     head.updateWorldMatrix(true, false);                  // this frame's pose, all joints above included
-    eye.copy(EYE).applyMatrix4(head.matrixWorld);
-    head.getWorldQuaternion(qTo).multiply(LOOK);
+    eyeHead.copy(EYE).applyMatrix4(head.matrixWorld);
+    head.getWorldQuaternion(qHead);
+    // plain skating: steady — above his body (no side sway), his eye height, facing his heading
+    w = inAction() ? Math.min(1, w + dt / 0.35) : Math.max(0, w - dt / 0.5);
+    const ew = w * w * (3 - 2 * w);
+    const fx = Math.sin(player.heading), fz = Math.cos(player.heading), r = player.mesh.position;
+    eye.set(r.x + fx * EYE.z, eyeHead.y, r.z + fz * EYE.z);
+    qTo.setFromAxisAngle(Y, player.heading);
+    if (ew > 0) { eye.lerp(eyeHead, ew); qTo.slerp(qHead, ew); }   // actions: the head itself
+    lookE.set(DOWN + lookPitch, Math.PI + lookYaw, 0); LOOK.setFromEuler(lookE);
+    qTo.multiply(LOOK);
     const e = k * k * (3 - 2 * k);                        // eased blend (only while switching)
     camera.position.lerp(eye, e);
     camera.quaternion.slerp(qTo, e);
@@ -8356,32 +8380,40 @@ const POV = (() => {
   }
   function set(m2) {
     if (m2 === mode) return;
-    mode = m2; subs.forEach((fn) => fn(mode));
+    mode = m2;
+    if (mode === 'first') { lookYaw = 0; lookPitch = 0; w = inAction() ? 1 : 0; }   // each time: start looking straight ahead
+    subs.forEach((fn) => fn(mode));
   }
   return {
     apply, set, toggle() { set(mode === 'first' ? 'third' : 'first'); },
-    get mode() { return mode; }, get hidden() { return hidden; },
+    get mode() { return mode; }, get hidden() { return hidden; }, get look() { return [lookYaw, lookPitch]; }, get action() { return w; },
     subscribe(fn) { subs.add(fn); fn(mode); },
   };
 })();
 // the POV button: in the top-right place of the rose counter (removed from view; rose collecting / confession logic
-// is untouched), same pill — same size, border, glass, font — but tappable: icon + "3인칭" / "1인칭"
+// is untouched): icon + "3인칭" / "1인칭". (v3) Built like the Music / speaker buttons next to it — their glass, border,
+// height (34 px · 40 px on touch screens) and their 20 px line icons — as a pill wide enough for the word; the
+// word keeps the counter's font.
 (() => {
   const counter = topHud.right.querySelector('.hud-count');
+  const peer = topHud.right.querySelector('button.hud-btn');
   const pov = document.createElement('button');
   pov.type = 'button';
-  pov.className = 'hud-count hud-pov';
-  if (counter) pov.style.cssText = counter.style.cssText;
-  Object.assign(pov.style, { pointerEvents: 'auto', cursor: 'pointer', margin: '0', appearance: 'none', webkitTapHighlightColor: 'transparent' });
+  pov.className = 'hud-btn hud-pov';
+  if (peer) pov.style.cssText = peer.style.cssText;
+  const cs = counter ? counter.style : null;
+  Object.assign(pov.style, { width: 'auto', padding: '0 13px 0 10px', gap: '6px', borderRadius: '999px', cursor: 'pointer', margin: '0',
+    appearance: 'none', webkitTapHighlightColor: 'transparent', pointerEvents: 'auto' });
+  if (cs) Object.assign(pov.style, { fontFamily: cs.fontFamily, fontSize: cs.fontSize, fontWeight: cs.fontWeight, letterSpacing: cs.letterSpacing, color: cs.color || '' });
   const ICON = {
-    // 3rd person: a person seen from behind, with the view (camera) behind them
-    third: '<svg width="23" height="23" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="14.5" cy="7.6" r="2.6"/><path d="M10 19.5c0-3.3 2-5.6 4.5-5.6s4.5 2.3 4.5 5.6"/><rect x="2.6" y="12.6" width="5.4" height="4.2" rx="1"/><path d="M8 13.9l2.2-1.2v4.6L8 16.1"/></svg>',
+    // 3rd person: a person (head and shoulders)
+    third: '<svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8.2" r="3.4"/><path d="M5.4 19.6c0-3.9 2.9-6.6 6.6-6.6s6.6 2.7 6.6 6.6"/></svg>',
     // 1st person: an eye (seeing through his eyes)
-    first: '<svg width="23" height="23" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.8 12c2.3-3.9 5.4-5.9 9.2-5.9s6.9 2 9.2 5.9c-2.3 3.9-5.4 5.9-9.2 5.9S5.1 15.9 2.8 12z"/><circle cx="12" cy="12" r="2.9"/></svg>',
+    first: '<svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.8 12c2.3-3.9 5.4-5.9 9.2-5.9s6.9 2 9.2 5.9c-2.3 3.9-5.4 5.9-9.2 5.9S5.1 15.9 2.8 12z"/><circle cx="12" cy="12" r="2.9"/></svg>',
   };
   const render = (mode) => {
     const t = mode === 'first' ? '1인칭' : '3인칭';
-    pov.innerHTML = `<span style="display:block;width:23px;height:23px;flex:none">${ICON[mode]}</span><span>${t}</span>`;
+    pov.innerHTML = `<span style="display:flex;width:20px;height:20px;flex:none">${ICON[mode]}</span><span style="line-height:1">${t}</span>`;
     pov.setAttribute('aria-label', `시점 전환 · 현재 ${t}`);
   };
   pov.addEventListener('click', (e) => { e.stopPropagation(); POV.toggle(); pov.blur(); });
