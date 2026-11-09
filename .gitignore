@@ -21,6 +21,7 @@
 # never commit
 node_modules/
 .env
+.env*
 .env.*
 *.pem
 *.key
