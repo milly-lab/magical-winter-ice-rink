@@ -2502,11 +2502,13 @@ class FollowCamera {
   }
 
   rotate(dYaw, dPitch) {
+    if (this.locked) return;                       // (POV) first person: the 3rd-person view is kept exactly as it was
     this.orbitYaw += dYaw;
     this.pitch = THREE.MathUtils.clamp(this.pitch + dPitch, this.minPitch, this.maxPitch);
   }
 
   zoom(factor) {
+    if (this.locked) return;
     this.targetRadius = THREE.MathUtils.clamp(this.targetRadius * factor, this.minRadius, this.maxRadius);
   }
 
@@ -8315,6 +8317,77 @@ if (window.visualViewport) window.visualViewport.addEventListener('resize', onRe
 // exactly as before, so their look is unchanged.
 const SIM_STEP = 1 / 240, MAX_CATCH_UP = 0.25;
 let simAcc = 0;
+// ===== camera/pov.js (POV: 1인칭 / 3인칭) =====
+// The 3rd-person FollowCamera keeps running every frame exactly as before; first person is laid ON TOP of it: the
+// camera is blended (0.6 s, eased) from the follow camera's pose to the skater's eyes — his head joint (so it rises,
+// dips and leans with every pose / animation), looking where he faces (his heading; a spin or a jump turn, which
+// only turns the body for a moment, does not whirl the view), slightly down at the ice ahead. His own body is hidden while the camera is at
+// his eyes (only on this screen: other players see him as always). Back in 3rd person the blend runs the other way
+// onto the follow camera, which never stopped — same distance, angle and orbit as before. Orbit / zoom drags are
+// ignored while in first person (they would silently change the 3rd-person view). Cinematic moments (the
+// confession) always use their own 3rd-person camera. Only the local camera changes: nothing is sent to the server.
+const POV = (() => {
+  let mode = 'third', k = 0, yaw = 0, hidden = false;
+  const BLEND = 0.6;                                     // s, one way
+  const eye = new THREE.Vector3(), look = new THREE.Vector3(), m = new THREE.Matrix4();
+  const qTo = new THREE.Quaternion(), qFrom = new THREE.Quaternion();
+  const subs = new Set();
+  const setHidden = (h) => { if (h === hidden) return; hidden = h; player.mesh.visible = !h; };
+  function apply(dt) {
+    const cinematic = !!(proposal.cameraTarget || interactions.cameraTarget);
+    const want = mode === 'first' && !cinematic ? 1 : 0;
+    k = want ? Math.min(1, k + dt / BLEND) : Math.max(0, k - dt / BLEND);
+    cine.locked = mode === 'first';
+    if (k <= 0) { setHidden(false); return; }
+    // the eyes: a little above the head joint and in front of it, facing his heading
+    yaw = player.heading;                                 // (his heading is already smooth: no extra lag)
+    player.rig.head.getWorldPosition(eye);
+    const fx = Math.sin(yaw), fz = Math.cos(yaw);
+    eye.x += fx * 0.12; eye.y += 0.06; eye.z += fz * 0.12;
+    look.set(eye.x + fx * 10, eye.y - 0.7, eye.z + fz * 10);   // ≈ 4° down: the ice ahead in view
+    const e = k * k * (3 - 2 * k);                        // eased blend
+    qFrom.copy(camera.quaternion);                        // = the follow camera this frame
+    m.lookAt(eye, look, camera.up); qTo.setFromRotationMatrix(m);
+    camera.position.lerp(eye, e);
+    camera.quaternion.slerp(qTo, e);
+    setHidden(e > 0.8);                                   // the camera is at / inside his head: hide him (only here)
+  }
+  function set(m2) {
+    if (m2 === mode) return;
+    mode = m2; subs.forEach((fn) => fn(mode));
+  }
+  return {
+    apply, set, toggle() { set(mode === 'first' ? 'third' : 'first'); },
+    get mode() { return mode; }, get hidden() { return hidden; },
+    subscribe(fn) { subs.add(fn); fn(mode); },
+  };
+})();
+// the POV button: in the top-right place of the rose counter (removed from view; rose collecting / confession logic
+// is untouched), same pill — same size, border, glass, font — but tappable: icon + "3인칭" / "1인칭"
+(() => {
+  const counter = topHud.right.querySelector('.hud-count');
+  const pov = document.createElement('button');
+  pov.type = 'button';
+  pov.className = 'hud-count hud-pov';
+  if (counter) pov.style.cssText = counter.style.cssText;
+  Object.assign(pov.style, { pointerEvents: 'auto', cursor: 'pointer', margin: '0', appearance: 'none', webkitTapHighlightColor: 'transparent' });
+  const ICON = {
+    // 3rd person: a person seen from behind, with the view (camera) behind them
+    third: '<svg width="23" height="23" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="14.5" cy="7.6" r="2.6"/><path d="M10 19.5c0-3.3 2-5.6 4.5-5.6s4.5 2.3 4.5 5.6"/><rect x="2.6" y="12.6" width="5.4" height="4.2" rx="1"/><path d="M8 13.9l2.2-1.2v4.6L8 16.1"/></svg>',
+    // 1st person: an eye (seeing through his eyes)
+    first: '<svg width="23" height="23" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.8 12c2.3-3.9 5.4-5.9 9.2-5.9s6.9 2 9.2 5.9c-2.3 3.9-5.4 5.9-9.2 5.9S5.1 15.9 2.8 12z"/><circle cx="12" cy="12" r="2.9"/></svg>',
+  };
+  const render = (mode) => {
+    const t = mode === 'first' ? '1인칭' : '3인칭';
+    pov.innerHTML = `<span style="display:block;width:23px;height:23px;flex:none">${ICON[mode]}</span><span>${t}</span>`;
+    pov.setAttribute('aria-label', `시점 전환 · 현재 ${t}`);
+  };
+  pov.addEventListener('click', (e) => { e.stopPropagation(); POV.toggle(); pov.blur(); });
+  pov.addEventListener('pointerdown', (e) => e.stopPropagation());       // (not a tap on the ice)
+  if (counter) counter.replaceWith(pov); else topHud.right.appendChild(pov);
+  POV.subscribe(render);
+})();
+
 let last = performance.now();
 const start = last;
 function simulate(frameDt, t) {
@@ -8335,6 +8408,7 @@ function simulate(frameDt, t) {
     if (proposal.cameraTarget) cine.update(dt, proposal.cameraTarget, cine.yaw);   // free camera, aimed at the couple
     else if (interactions.cameraTarget) cine.update(dt, interactions.cameraTarget, cine.yaw);   // (Phase 8: a real confession)
     else cine.update(dt, player.position, player.heading);
+    POV.apply(dt);                                             // (POV) first person on top of the follow camera
     controls.update(dt);
     roseCollector.update(dt);
     skateFx.update(dt);
@@ -8345,7 +8419,7 @@ function simulate(frameDt, t) {
     remoteSkaters.update(dt);                                  // (Phase 4) other players: once per frame, after the camera
     interactions.hands();                                      // (Phase 7) the holding hands meet (after all poses)
   }
-  nameTag.update();                                          // (Phase 3) nickname above his / her head
+  if (POV.hidden) nameTag.hide(); else nameTag.update();     // (Phase 3) nickname above his / her head (not in 1st person)
   remotePlayers.updateTags();                                // (Phase 5) other players' nicknames
   RINK_LINK.tick();                                          // (Phase 5) send own movement (≤ 6.7/s, only when it changes)
   world.update(t);
