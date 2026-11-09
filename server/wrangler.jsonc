@@ -14,7 +14,7 @@
   // plain settings (NOT secrets — safe to be public)
   "vars": {
     // pages allowed to connect (origin = scheme + host only; the GitHub Pages path is not part of it)
-    "ALLOWED_ORIGINS": "https://milly-lab.github.io",
+    "ALLOWED_ORIGINS": "https://milly-lab.github.io,https://ice-rink-winterwood.pages.dev",
     // room capacity: 4 players in total (agreed starting point; raise only after real phone tests)
     "MAX_PLAYERS": "4",
     // incoming messages per UTC day before new players are refused: 1,600,000 msgs ≈ 80,000 billed requests (80% of the free 100,000)
