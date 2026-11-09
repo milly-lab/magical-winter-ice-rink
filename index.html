@@ -5747,10 +5747,12 @@ const GameAudio = (() => {
 })();
 
 // ---- (Phase 7.5) background music: its own channel ------------------------------------------------------
-// The files in music/ (real names below) play in a shuffled order: every track once, then a new shuffle (never the
-// same track twice in a row, also across shuffles), forever. Each track fades in (1.2 s) and fades out over its last
-// 1.2 s. Nothing plays until the player taps the Music button (browser autoplay rules are respected). A file that
-// fails to load is skipped; if none can be played the button says so — the game itself is never affected.
+// (Phase 7.5.2) The files in music/ play IN ORDER, 01 → 06, then 01 again, forever. Each track fades in (1.2 s) and
+// fades out over its last 1.2 s. Music is ON by default at 20%: it starts by itself when the rink appears; if the
+// browser blocks sound before any interaction, it starts at the player's first tap / click / key instead (never
+// switched off for good because of that). If the player turns it off (play / pause in the Music panel) it stays off,
+// also on the next visit, until they turn it on again. A file that fails to load is skipped; if none can be played
+// the button says so — the game itself is never affected.
 // Chain: <audio> → fade gain (track fades / pause) → track levelling → music gain (the slider) → speakers.
 // The real files (checked in the repository, 2026-11-08). Their loudness differs a lot (measured EBU R128 integrated
 // loudness −24.8 … −11.5 LUFS), so each one gets a fixed gain to −18 LUFS: no track jumps out or fades away.
@@ -5773,28 +5775,21 @@ const MUSIC_DIR = 'music/', MUSIC_FILES = [
   ['track06-alex-morgan-calm-piano.mp3', -11.5],
 ].map(([name, lufs]) => ({ name, gain: 10 ** ((-18 - lufs) / 20) }));
 const MusicAudio = (() => {
-  let volume = 0.5, muted = false;
+  let volume = 0.2, muted = false, on = true;     // (7.5.2) default: on, 20%
   try {
     const s = JSON.parse(localStorage.getItem('rink.music') || 'null');
     if (s && typeof s.volume === 'number') { volume = Math.min(1, Math.max(0, s.volume)); muted = !!s.muted; }
+    if (s && s.on === false) on = false;           // the player switched it off last time
   } catch (e) { /* storage unavailable: defaults */ }
-  const save = () => { try { localStorage.setItem('rink.music', JSON.stringify({ volume, muted })); } catch (e) { /* ignore */ } };
+  const save = () => { try { localStorage.setItem('rink.music', JSON.stringify({ volume, muted, on })); } catch (e) { /* ignore */ } };
   const XF = 1.2;                                   // s: fade in at the start / fade out at the end of a track
   let el = null, fade = null, trim = null, gain = null, ctx = null;
-  let playing = false, started = false, unavailable = !MUSIC_FILES.length, failed = 0, cur = -1, last = -1, bag = [], ending = false, pauseT = 0;
+  let playing = false, started = false, unavailable = !MUSIC_FILES.length, failed = 0, cur = -1, last = -1, ending = false, pauseT = 0;
   const subs = new Set();
   const notify = () => subs.forEach((fn) => fn());
   const level = () => (muted ? 0 : volume);
   const ramp = (g, v, sec) => { if (!g) return; const t = ctx.currentTime; g.gain.cancelScheduledValues(t); g.gain.setValueAtTime(g.gain.value, t); g.gain.linearRampToValueAtTime(v, t + sec); };
-  function nextIndex() {
-    const n = MUSIC_FILES.length;
-    if (!bag.length) {                              // a new shuffle of all tracks
-      bag = [...Array(n).keys()];
-      for (let i = n - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [bag[i], bag[j]] = [bag[j], bag[i]]; }
-      if (n > 1 && bag[0] === last) [bag[0], bag[1]] = [bag[1], bag[0]];
-    }
-    return bag.shift();
-  }
+  const nextIndex = () => (last + 1) % MUSIC_FILES.length;   // (7.5.2) 01 → 02 → … → 06 → 01
   function ensure() {
     if (el) return true;
     try {
@@ -5807,7 +5802,7 @@ const MusicAudio = (() => {
       src.connect(fade); fade.connect(trim); trim.connect(gain); gain.connect(ctx.destination);
     } catch (e) { DIAG.log('music: Web Audio connection failed: ' + (e && e.message)); el = null; unavailable = true; notify(); return false; }
     el.addEventListener('canplay', () => audioInfo(`music: ready ${MUSIC_FILES[cur].name} (AudioContext ${ctx.state})`));
-    el.addEventListener('playing', () => { failed = 0; if (playing) ramp(fade, 1, XF); });
+    el.addEventListener('playing', () => { failed = 0; if (playing) ramp(fade, 1, XF); if (ctx.state === 'running') disarm(); });
     el.addEventListener('timeupdate', () => {     // the last 1.2 s of a track: fade out
       if (!ending && playing && el.duration && el.duration - el.currentTime < XF) { ending = true; ramp(fade, 0, Math.max(0.2, el.duration - el.currentTime)); }
     });
@@ -5827,9 +5822,26 @@ const MusicAudio = (() => {
     el.src = MUSIC_DIR + encodeURIComponent(MUSIC_FILES[i].name);    // (names may hold spaces / Korean)
     audioInfo('music: loading ' + audioUrl(el.getAttribute('src')));
     el.play().catch((e) => {                       // (a missing file is reported by the error event above)
-      if (e && e.name === 'NotAllowedError') DIAG.log('music: play() blocked by the browser autoplay rules — tap the Music button again');
+      if (e && e.name === 'NotAllowedError') blocked();
       else if (e && e.name !== 'AbortError' && e.name !== 'NotSupportedError') DIAG.log('music: play() failed: ' + e.name);
     });
+  }
+  // (7.5.2) the browser would not let it start without an interaction: wait for the first tap / click / key
+  const GESTURES = ['pointerdown', 'touchend', 'click', 'keydown'];
+  let armed = false;
+  const onGesture = () => { if (on && !playing && !unavailable && !document.hidden) play(); else if (!on) disarm(); };
+  function arm() { if (armed) return; armed = true; GESTURES.forEach((g) => addEventListener(g, onGesture, true)); }
+  function disarm() { if (!armed) return; armed = false; GESTURES.forEach((g) => removeEventListener(g, onGesture, true)); }
+  function blocked() {
+    if (!on) return;
+    audioInfo('music: autoplay blocked by the browser — starts at the first tap / click / key');
+    playing = false; clearTimeout(pauseT); if (el) el.pause(); notify(); arm();
+  }
+  function autoStart() {
+    if (!on || unavailable || started) return;
+    play();
+    // the element may be allowed to play while the AudioContext still is not (silence): treat that as blocked too
+    setTimeout(() => { if (on && playing && ctx && ctx.state !== 'running') blocked(); }, 400);
   }
   function play() {
     if (unavailable || !ensure()) return;
@@ -5865,7 +5877,10 @@ const MusicAudio = (() => {
     get track() { return cur < 0 ? null : MUSIC_FILES[cur].name; },
     setVolume(v) { volume = Math.min(1, Math.max(0, v)); if (volume > 0) muted = false; changed(); },
     setMuted(m) { muted = !!m; changed(); },
-    play, pause, toggle() { if (playing) pause(); else play(); },
+    play, pause, autoStart,
+    // the play / pause button: the player's own choice is remembered (off stays off until they turn it on)
+    toggle() { if (playing) { on = false; save(); disarm(); pause(); } else { on = true; save(); play(); } },
+    get on() { return on; },
     subscribe(fn) { subs.add(fn); return () => subs.delete(fn); },
   };
 })();
@@ -6124,7 +6139,8 @@ function createTopHud({ toast } = {}) {
   mus.addEventListener('click', () => {
     const o = !musOpen();
     setMusOpen(o); if (o) setVolOpen(false);
-    if (!MusicAudio.started) { MusicAudio.play(); if (MusicAudio.unavailable && toast) toast('배경음악을 불러오지 못했어요.', 2.5); }
+    // (7.5.2) music starts by itself now (or at the first tap if the browser blocked it); this button only opens the panel
+    if (MusicAudio.unavailable && toast) toast('배경음악을 불러오지 못했어요.', 2.5);
     mus.blur();
   });
   mpp.addEventListener('click', () => { MusicAudio.toggle(); });
@@ -8266,6 +8282,7 @@ function renderFrame(dt) {
     DIAG.info = { mode: RENDER.mode, mobile: IS_MOBILE, pixelRatio: renderer.getPixelRatio(), buffer: `${b.x}x${b.y}`, floatRT: FLOAT_RT_OK,
       maxSamples: gl.getParameter(gl.MAX_SAMPLES), fragUniforms: gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS) };
     console.info('[Rink] started', DIAG.info);
+    try { MusicAudio.autoStart(); } catch (e) { DIAG.log('music: ' + e.message); }   // (7.5.2) music on when the rink appears
   }
 }
 
