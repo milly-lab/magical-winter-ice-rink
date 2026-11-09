@@ -66,42 +66,46 @@
         letter-spacing: 0; transition: opacity .6s ease; touch-action: none; -webkit-user-select: none; user-select: none; }
       #rink-loading.ld-out { opacity: 0; pointer-events: none; }
       #rink-loading .ld-flake { width: 112px; height: 112px; overflow: visible; filter: drop-shadow(0 0 10px rgba(150, 190, 255, .35)); }
-      /* (2026-11-06) three lines: 마법의 아이스링크장 / 오픈중 / progress (%), Pretendard, letter-spacing 0 */
+      /* (2026-11-06) three lines: 아이스링크장 / 오픈중 / progress (%), Pretendard, letter-spacing 0 (7.5: was 마법의 아이스링크장) */
       #rink-loading .ld-title { display: flex; flex-direction: column; align-items: center; gap: 2px; letter-spacing: 0; }
       #rink-loading .ld-l1 { font-size: 17px; font-weight: 600; line-height: 1.45; opacity: .95; }
       #rink-loading .ld-l2 { font-size: 15px; font-weight: 400; line-height: 1.45; opacity: .8; }
       #rink-loading .ld-l3 { margin-top: 8px; font-size: 13px; font-weight: 500; line-height: 1.3; opacity: .58; font-variant-numeric: tabular-nums; }
-      /* snowflake loop (5.2 s), one step at a time (ease-in-out): dot → six long stems grow out from the centre →
-         the inner short branches → the outer short branches → one turn → bursts into snow → back to the dot */
-      #rink-loading .ld-spin { animation: ld-spin 5.2s cubic-bezier(.45, 0, .55, 1) infinite; transform-origin: 0 0; }
+      /* snowflake loop, one step at a time (ease-in-out): dot → six long stems grow out from the centre →
+         the short branches → one turn → bursts into snow → back to the dot.
+         (Phase 7.5) the flake now forms in half the time (2.1 s → 1.05 s): the short branches no longer wait for the
+         long stems — the inner pair starts when the stem is half grown (right where it sits on the stem), the outer pair
+         as soon as the stem reaches its spot, and all of them finish together with the stem. The turn, burst and return
+         keep their length, so one loop is 5.2 → 4.15 s. */
+      #rink-loading .ld-spin { animation: ld-spin 4.15s cubic-bezier(.45, 0, .55, 1) infinite; transform-origin: 0 0; }
       #rink-loading .ld-stem, #rink-loading .ld-b1, #rink-loading .ld-b2 { stroke-dasharray: 1; stroke-dashoffset: 1; opacity: 0;
-        animation: 5.2s cubic-bezier(.45, 0, .55, 1) infinite; }
+        animation: 4.15s cubic-bezier(.45, 0, .55, 1) infinite; }
       #rink-loading .ld-stem { animation-name: ld-stem; }
       #rink-loading .ld-b1 { animation-name: ld-b1; }
       #rink-loading .ld-b2 { animation-name: ld-b2; }
-      #rink-loading .ld-dot { animation: ld-dot 5.2s ease-in-out infinite; transform-origin: 0 0; }
-      #rink-loading .ld-bit { opacity: 0; animation: ld-burst 5.2s cubic-bezier(.2, .7, .3, 1) infinite; }
-      @keyframes ld-stem { 0%, 8% { stroke-dashoffset: 1; opacity: 0; } 8.5% { stroke-dashoffset: 1; opacity: 1; } 30% { stroke-dashoffset: 0; opacity: 1; }
-        76% { stroke-dashoffset: 0; opacity: 1; } 80%, 100% { stroke-dashoffset: 0; opacity: 0; } }
-      @keyframes ld-b1 { 0%, 31% { stroke-dashoffset: 1; opacity: 0; } 31.5% { stroke-dashoffset: 1; opacity: 1; } 40% { stroke-dashoffset: 0; opacity: 1; }
-        76% { stroke-dashoffset: 0; opacity: 1; } 80%, 100% { stroke-dashoffset: 0; opacity: 0; } }
-      @keyframes ld-b2 { 0%, 41% { stroke-dashoffset: 1; opacity: 0; } 41.5% { stroke-dashoffset: 1; opacity: 1; } 49% { stroke-dashoffset: 0; opacity: 1; }
-        76% { stroke-dashoffset: 0; opacity: 1; } 80%, 100% { stroke-dashoffset: 0; opacity: 0; } }
-      @keyframes ld-spin { 0%, 52% { transform: rotate(0) scale(1); } 74% { transform: rotate(360deg) scale(1); }
-        78% { transform: rotate(372deg) scale(1.12); } 100% { transform: rotate(372deg) scale(1.12); } }
-      @keyframes ld-dot { 0% { transform: scale(.6); opacity: .7; } 8% { transform: scale(1.15); opacity: 1; } 14%, 76% { transform: scale(1); opacity: 1; }
-        80% { transform: scale(0); opacity: 0; } 92% { transform: scale(0); opacity: 0; } 100% { transform: scale(.6); opacity: .7; } }
-      @keyframes ld-burst { 0%, 76% { opacity: 0; transform: translate(0, 0) scale(1); } 78% { opacity: 1; }
-        95% { opacity: 0; transform: translate(var(--bx), var(--by)) scale(.4); } 100% { opacity: 0; transform: translate(var(--bx), var(--by)) scale(.4); } }
-      /* a message (room full / no connection): the snowflake stays still, complete */
-      #rink-loading.ld-msg .ld-spin, #rink-loading.ld-msg .ld-dot, #rink-loading.ld-msg .ld-bit { animation: none; }
-      #rink-loading.ld-msg .ld-stem, #rink-loading.ld-msg .ld-b1, #rink-loading.ld-msg .ld-b2 { animation: none; stroke-dashoffset: 0; opacity: 1; }
-      #rink-loading .ld-panel { display: none; flex-direction: column; align-items: center; gap: 8px; max-width: 340px; }
+      #rink-loading .ld-dot { animation: ld-dot 4.15s ease-in-out infinite; transform-origin: 0 0; }
+      #rink-loading .ld-bit { opacity: 0; animation: ld-burst 4.15s cubic-bezier(.2, .7, .3, 1) infinite; }
+      @keyframes ld-stem { 0%, 10.03% { stroke-dashoffset: 1; opacity: 0; } 10.66% { stroke-dashoffset: 1; opacity: 1; } 36.05% { stroke-dashoffset: 0; opacity: 1; }
+        69.91% { stroke-dashoffset: 0; opacity: 1; } 74.92%, 100% { stroke-dashoffset: 0; opacity: 0; } }
+      @keyframes ld-b1 { 0%, 23.28% { stroke-dashoffset: 1; opacity: 0; } 23.35% { stroke-dashoffset: 1; opacity: 1; } 36.05% { stroke-dashoffset: 0; opacity: 1; }
+        69.91% { stroke-dashoffset: 0; opacity: 1; } 74.92%, 100% { stroke-dashoffset: 0; opacity: 0; } }
+      @keyframes ld-b2 { 0%, 26.96% { stroke-dashoffset: 1; opacity: 0; } 27.04% { stroke-dashoffset: 1; opacity: 1; } 36.05% { stroke-dashoffset: 0; opacity: 1; }
+        69.91% { stroke-dashoffset: 0; opacity: 1; } 74.92%, 100% { stroke-dashoffset: 0; opacity: 0; } }
+      @keyframes ld-spin { 0%, 39.81% { transform: rotate(0) scale(1); } 67.40% { transform: rotate(360deg) scale(1); }
+        72.41% { transform: rotate(372deg) scale(1.12); } 100% { transform: rotate(372deg) scale(1.12); } }
+      @keyframes ld-dot { 0% { transform: scale(.6); opacity: .7; } 10.03% { transform: scale(1.15); opacity: 1; } 17.55%, 69.91% { transform: scale(1); opacity: 1; }
+        74.92% { transform: scale(0); opacity: 0; } 89.97% { transform: scale(0); opacity: 0; } 100% { transform: scale(.6); opacity: .7; } }
+      @keyframes ld-burst { 0%, 69.91% { opacity: 0; transform: translate(0, 0) scale(1); } 72.41% { opacity: 1; }
+        93.73% { opacity: 0; transform: translate(var(--bx), var(--by)) scale(.4); } 100% { opacity: 0; transform: translate(var(--bx), var(--by)) scale(.4); } }
+      /* a message (room full / no connection) — (Phase 7.5) the SAME screen as the loading: same background, the same
+         snowflake with the same animation, and the text set exactly like the loading lines (head = line 1, body =
+         line 2, same gap); only the words and the buttons below are its own */
+      #rink-loading .ld-panel { display: none; flex-direction: column; align-items: center; gap: 2px; max-width: 340px; letter-spacing: 0; }
       #rink-loading.ld-msg .ld-panel { display: flex; }
       #rink-loading.ld-msg .ld-title { display: none; }
-      #rink-loading .ld-head { font-size: 17px; font-weight: 600; line-height: 1.45; }
-      #rink-loading .ld-body { font-size: 14px; line-height: 1.6; opacity: .8; }
-      #rink-loading .ld-btns { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: 12px; }
+      #rink-loading .ld-head { font-size: 17px; font-weight: 600; line-height: 1.45; opacity: .95; }   /* = .ld-l1 */
+      #rink-loading .ld-body { font-size: 15px; font-weight: 400; line-height: 1.45; opacity: .8; }     /* = .ld-l2 */
+      #rink-loading .ld-btns { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: 16px; }
       #rink-loading .ld-btn { padding: 12px 20px; min-height: 44px; border-radius: 999px; border: 1px solid rgba(243, 217, 184, .45);
         background: rgba(6, 12, 26, .55); font: inherit; font-size: 14px; letter-spacing: 0; cursor: pointer; touch-action: manipulation; }
       #rink-loading .ld-btn.ld-primary { background: rgba(243, 217, 184, .16); border-color: rgba(243, 217, 184, .75); }
@@ -149,7 +153,7 @@
           <circle class="ld-bit" r="2.2" style="--bx:-45px;--by:-26px"/><circle class="ld-bit" r="1.6" style="--bx:-26px;--by:-45px"/>
         </g>
       </svg>
-      <div class="ld-title"><div class="ld-l1">마법의 아이스링크장</div><div class="ld-l2">오픈중</div><div class="ld-l3" data-progress>0%</div></div>
+      <div class="ld-title"><div class="ld-l1">아이스링크장</div><div class="ld-l2">오픈중</div><div class="ld-l3" data-progress>0%</div></div>
       <div class="ld-panel">
         <div class="ld-head" data-head></div>
         <div class="ld-body" data-body></div>
@@ -3201,9 +3205,14 @@ class PlaceholderPlayer {
 
   _applyTrick(dt) {
     const T = this.trick;
-    const PREP = 0.1, AIR = 1.5, END = 2.2;   // prep 0.1 s · air 1.5 s · landing 0.6 s (animation time)
+    // (Phase 7.5) a bigger jump: 20% farther AND 20% higher, as one larger arc. Height grows with the square of the
+    // flight time, so the flight lasts √1.2 ≈ 9.5% longer (1.5 → 1.64 s) and the forward speed in the air grows the
+    // remaining ≈ 9.5%. The 4 turns keep their exact length (same rotation speed), centred in the longer flight, so
+    // he opens out a touch earlier before touching down. Everything after the take-off moves later by the extra air.
+    const AIR0 = 1.5, JUMP_K = 1.2;            // the confirmed values (SP12) · the scale of the arc
+    const PREP = 0.1, AIR = AIR0 * Math.sqrt(JUMP_K), AX = AIR - AIR0, END = 2.2 + AX;   // prep · air · landing 0.6 s (animation time)
     const EASE = 0.3;                          // peak speed-up in the middle (1 + EASE)
-    const CROUCH = 0.4, CUSHION = 0.3, CUSHION_AT = 1.65;   // new separate phases (real seconds)
+    const CROUCH = 0.4, CUSHION = 0.3, CUSHION_AT = 1.65 + AX;   // new separate phases (real seconds)
     T.hold1 = T.hold1 || 0; T.hold2 = T.hold2 || 0;
     if (!T.crouchDone && T.t >= PREP - 1e-6) {                        // compress & gather power, then spring
       T.hold1 += dt; if (T.hold1 >= CROUCH) T.crouchDone = true;
@@ -3224,19 +3233,19 @@ class PlaceholderPlayer {
     const mix = (obj, key, target, w) => { obj[key] = lerp(obj[key], target, w); };
 
     // weights
-    const wCross = sm(0.01, 0.1, t) * (1 - sm(1.6, 1.85, t));       // arms crossed: prep → air
+    const wCross = sm(0.01, 0.1, t) * (1 - sm(1.6 + AX, 1.85 + AX, t));       // arms crossed: prep → air
     const wCrouch = T.crouchDone ? 0 : sm(0, 0.7, pc) * (1 - sm(0.82, 1, pc)); // 0.4 s: compress → drive up
-    const wAir = sm(0.1, 0.2, t) * (1 - sm(1.55, 1.65, t));           // tight air position
-    const wLand = sm(1.55, 1.65, t) * (1 - sm(1.9, 2.2, t));         // landing position
-    const wOpen = sm(1.6, 1.85, t) * (1 - sm(1.95, 2.2, t));           // arms open on landing
+    const wAir = sm(0.1, 0.2, t) * (1 - sm(1.55 + AX, 1.65 + AX, t));           // tight air position
+    const wLand = sm(1.55 + AX, 1.65 + AX, t) * (1 - sm(1.9 + AX, 2.2 + AX, t));         // landing position
+    const wOpen = sm(1.6 + AX, 1.85 + AX, t) * (1 - sm(1.95 + AX, 2.2 + AX, t));           // arms open on landing
     const absorb = T.cushionDone ? 0 : sm(0, 0.25, pl) * (1 - sm(0.35, 1, pl)); // 0.3 s: sink → rise
 
     // flight: height + exactly 3 turns about the vertical axis
     const u = clamp01((t - PREP) / AIR);
-    const jumpY = 1.5 * (4 * u * (1 - u)) ** 2;                        // 0.46 m → 1.5 m (mid-spin) → 0.46 m
+    const jumpY = 1.5 * JUMP_K * (4 * u * (1 - u)) ** 2;               // top 1.5 m → 1.8 m (7.5)
     // rotation window widened to u 0.08–0.92 with a stronger in-out ease (7th-order smoothstep): the turns start
     // and finish more gently like a real jump, peak turn rate ~7% lower than before
-    const us = clamp01((u - 0.08) / 0.84);
+    const SPIN_T = 0.84 * AIR0, us = clamp01((t - PREP - (AIR - SPIN_T) / 2) / SPIN_T);   // (7.5) same 1.26 s of turning, centred
     const e = us * us * us * us * (35 - 84 * us + 70 * us * us - 20 * us * us * us);
     const spin = Math.PI * 8 * e;                                      // exactly 1440° (4 turns)
 
@@ -3335,7 +3344,7 @@ class PlaceholderPlayer {
     }
     if (T.takeoff && t < PREP + AIR) {
       const rate = (x) => 1 + EASE * Math.sin((Math.PI * Math.min(x, END)) / END) ** 2;
-      const w0 = (1.0 * AIR) / 16 / rate(PREP);                       // take-off speed ≈ 1 m/s
+      const w0 = (1.0 * AIR0) / 16 / rate(PREP);                      // take-off speed ≈ 1 m/s (shape of the confirmed jump)
       const w1 = 1 / rate(PREP + AIR);                                // touchdown speed = glide start speed
       const cFull = 3 * (1 - (w0 + w1) / 2);                           // extra speed concentrated in the spin
       const sa = 0.08, sL = 0.84, xs = Math.min(Math.max(u - sa, 0), sL);   // same window as the rotation
@@ -3349,7 +3358,7 @@ class PlaceholderPlayer {
       // same total distance as above (T.D), but the speed along it now eases in and out: leaves the ice at the
       // approach speed (~1 m/s) and builds up smoothly, carries through the rotation, and slows into the landing
       // (touchdown at 70% of the average flight speed) — cubic Hermite in u with those end slopes
-      T.D = T.dist * T.S1;
+      T.D = T.dist * T.S1 * JUMP_K;                                   // (7.5) 20% farther (still well inside the clear path)
       const s0 = Math.min(1, (1.0 * AIR) / Math.max(T.D, 0.05) / rate(PREP)), s1 = 0.7;
       const u2 = u * u, u3 = u2 * u;
       const H = -2 * u3 + 3 * u2 + (u3 - 2 * u2 + u) * s0 + (u3 - u2) * s1;
@@ -4744,7 +4753,13 @@ const CH = {
   spin: [20.2, 21.4, 25.8, 27.1],   // I-Spin turn rate: ramp up · full · slow down · stop (whole turns)
   spinPeak: 15,                      // rad/s at full speed (≈2.4 turns/s)
   jump: [14.45, 15.15],              // Salchow: off the ice → touch down (0.7 s in the air)
-  jumpH: 0.46,                       // m, top of the jump
+  jumpH: 0.46 * 1.2,                 // m, top of the jump (Phase 7.5: 0.46 → 0.55 m, +20%)
+  jumpTurn: 0.7 / 1.2,               // (Phase 7.5) s the one turn takes: 20% faster than the 0.7 s flight, so it is
+                                     // done just before touch-down and he lands already open (same take-off / landing)
+  // (Phase 7.5) quicker start: the arms open 1.3× faster (0.1–1.3 s → 0.08–1.0 s) and the plain skating that followed
+  // (1.3–2.6 s, nothing changes in it) is skipped, so the Ina Bauer begins 1.0 s after the tap instead of 2.6 s.
+  // All moves after it keep their exact lengths and order (only 1.6 s earlier). Script time ↔ real time: see step().
+  OPEN_FAST: 1.3, SKIP: [1.3, 2.6],
 };
 const _chE = new THREE.Euler();
 const chQ = (a) => new THREE.Quaternion().setFromEuler(_chE.set(a[0], a[1], a[2]));
@@ -4974,7 +4989,8 @@ class Choreography {
 
   step(dt) {
     const P = this.P, R = this.R, J = this.J;
-    this.t = Math.min(CH.END, this.t + dt);
+    this.t = Math.min(CH.END, this.t + dt * (this.t < CH.SKIP[0] ? CH.OPEN_FAST : 1));   // (7.5) script time
+    if (this.t >= CH.SKIP[0] && this.t < CH.SKIP[1]) this.t += CH.SKIP[1] - CH.SKIP[0];
     const t = this.t;
     // top speed: eases down to 9 m/s for the jump and 3.5 m/s for the spin, then back to 27 (steering is never limited)
     const lim = (v, a, b, c, d) => 27 + (v - 27) * psSm(a, b, t) * (1 - psSm(c, d, t));
@@ -5004,8 +5020,8 @@ class Choreography {
     this.sm.p.lerp(R.pelvis.position, kS); R.pelvis.position.copy(this.sm.p);
 
     // body turn about the vertical axis: sideways (Ina Bauer) → backward → +1 turn (Salchow) → forward → spin
-    const [j0, j1] = CH.jump, u = psClamp01((t - j0) / (j1 - j0));
-    const eJump = 0.4 * u + 0.6 * psSmoother(u);           // exactly 360°, already turning as he leaves the ice
+    const [j0, j1] = CH.jump, u = psClamp01((t - j0) / (j1 - j0)), uT = psClamp01((t - j0) / CH.jumpTurn);
+    const eJump = 0.4 * uT + 0.6 * psSmoother(uT);         // exactly 360°, already turning as he leaves the ice (7.5: 20% faster)
     if (t > CH.spin[0] && t < CH.spin[3]) this.theta += this.k * this.rate(t) * dt;
     else if (t >= CH.spin[3]) this.theta = Math.round(this.theta / (Math.PI * 2)) * Math.PI * 2;
     const yaw = -Math.PI / 2 * psSm(2.7, 4.1, t) - Math.PI / 2 * psSm(8.8, 10.0, t) + Math.PI * 2 * eJump
@@ -5068,15 +5084,14 @@ const STORY_UI = (() => {
     'border:1px solid rgba(246,241,231,.16)',
     'letter-spacing:0', 'backdrop-filter:blur(4px)', '-webkit-backdrop-filter:blur(4px)', 'transition:transform .25s',
   ].join(';');
-  // icon (2026-11-03, after the user's reference): minimal white line rose bud seen from above — overlapping outer
-  // petals, one curled inner petal, a spiral centre; outlines only (no fill, no leaves); a little larger than the speaker
-  counter.innerHTML = `<svg width="23" height="23" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="#f6f1e7"
-      stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M19.39 12 L19.18 12.31 L18.98 12.61 L19.14 12.94 L19.28 13.28 L19.4 13.64 L19.49 14.01 L19.55 14.38 L19.59 14.76 L19.6 15.15 L19.58 15.53 L19.53 15.92 L19.45 16.3 L19.35 16.68 L19.21 17.05 L19.05 17.41 L18.86 17.75 L18.64 18.08 L18.4 18.4 L18.13 18.69 L17.85 18.97 L17.54 19.22 L17.21 19.45 L16.87 19.65 L16.52 19.82 L16.15 19.97 L15.77 20.09 L15.39 20.18 L15 20.24 L14.61 20.27 L14.22 20.27 L13.83 20.24 L13.44 20.18 L13.07 20.1 L12.7 19.99 L12.34 19.85 L12 19.69 L11.67 19.5 L11.36 19.29 L11.07 19.07 L10.73 19.2 L10.38 19.33 L10.01 19.43 L9.63 19.5 L9.25 19.55 L8.87 19.56 L8.48 19.55 L8.09 19.51 L7.71 19.43 L7.33 19.33 L6.96 19.2 L6.6 19.04 L6.25 18.85 L5.92 18.64 L5.6 18.4 L5.31 18.13 L5.03 17.85 L4.78 17.54 L4.55 17.21 L4.35 16.87 L4.18 16.52 L4.03 16.15 L3.92 15.77 L3.83 15.38 L3.78 14.99 L3.75 14.6 L3.75 14.21 L3.79 13.82 L3.85 13.44 L3.94 13.06 L4.06 12.69 L4.21 12.34 L4.38 12 L4.58 11.68 L4.78 11.37 L4.62 11.03 L4.49 10.68 L4.38 10.31 L4.29 9.94 L4.24 9.55 L4.2 9.16 L4.2 8.77 L4.23 8.38 L4.28 7.98 L4.37 7.59 L4.48 7.21 L4.62 6.83 L4.79 6.47 L4.99 6.12 L5.21 5.78 L5.46 5.46 L5.73 5.16 L6.02 4.88 L6.34 4.62 L6.67 4.39 L7.02 4.18 L7.38 4 L7.76 3.85 L8.14 3.73 L8.53 3.63 L8.93 3.57 L9.33 3.53 L9.73 3.53 L10.13 3.55 L10.52 3.61 L10.91 3.69 L11.28 3.8 L11.65 3.93 L12 4.09 L12.34 4.27 L12.66 4.48 L12.96 4.7 L13.28 4.72 L13.64 4.59 L14.01 4.49 L14.39 4.42 L14.77 4.38 L15.16 4.36 L15.55 4.38 L15.94 4.43 L16.33 4.51 L16.7 4.62 L17.07 4.75 L17.43 4.92 L17.78 5.12 L18.1 5.34 L18.41 5.59 L18.7 5.86 L18.97 6.15 L19.21 6.46 L19.43 6.8 L19.62 7.14 L19.78 7.51 L19.92 7.88 L20.02 8.26 L20.09 8.65 L20.13 9.04 L20.14 9.43 L20.12 9.82 L20.07 10.21 L19.99 10.59 L19.88 10.96 L19.74 11.32 L19.58 11.67Z"/>
-      <path d="M12.57 6.53 Q11.47 4.92 12.41 4.51 M17.47 12.57 Q19.08 11.47 19.49 12.41 M11.33 17.46 Q12.41 19.09 11.46 19.48 M6.54 11.33 Q4.91 12.41 4.52 11.46"/>
-      <path d="M7.98 13.77A4.6 4.6 0 1 1 12.7 16.78"/>
-      <path d="M11.98 11.31 L12.11 11.25 L12.26 11.22 L12.42 11.21 L12.59 11.25 L12.76 11.31 L12.91 11.42 L13.05 11.56 L13.17 11.73 L13.25 11.93 L13.29 12.16 L13.29 12.39 L13.24 12.63 L13.14 12.86 L12.99 13.08 L12.8 13.27 L12.56 13.43 L12.3 13.54 L12 13.6 L11.69 13.6 L11.38 13.54 L11.08 13.42 L10.79 13.24 L10.54 13 L10.34 12.71 L10.19 12.38 L10.1 12.02 L10.08 11.64 L10.14 11.25 L10.27 10.87 L10.48 10.51 L10.75 10.2 L11.09 9.93 L11.48 9.73 L11.91 9.61 L12.37 9.56 L12.83 9.61 L13.29 9.74 L13.72 9.97 L14.11 10.27 L14.44 10.65"/>
-    </svg><span>0/10</span>`;
+  // icon (Phase 7.5): the real white rose of the rink (createRoseGeometry, the same clay colour), rendered straight from
+  // above — the six outer petals, the inner layers and the bud — on a transparent background (96 px PNG, shown at the
+  // former icon's 23 px). Was: a white line drawing of a rose bud (2026-11-03).
+  const ROSE_ICON_PNG = 'data:image/png;base64,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';
+  // (7.5.1) a solid round flower looks much bigger than the thin line icons next to it at the same box size: the rose is
+  // drawn 15 px high (≈ the note / speaker glyphs) inside the unchanged 23 px slot, so the counter keeps its size
+  counter.innerHTML = `<img src="${ROSE_ICON_PNG}" width="23" height="23" alt="" aria-hidden="true" draggable="false"
+      style="display:block;width:23px;height:23px;padding:4px;box-sizing:border-box;flex:none"><span>0/10</span>`;
   counter.className = 'hud-count';
   const label = counter.querySelector('span');
   const toast = document.createElement('div');
@@ -5697,6 +5712,9 @@ const HUD_GLASS = ['background:rgba(6,12,26,.55)', 'border:1px solid rgba(246,24
 // ---- game audio: one master volume for every game sound -------------------------------------------------
 // The game has no sounds yet. Any sound added later connects to GameAudio.output (Web Audio) so the HUD volume
 // control applies to it automatically. Volume / mute are remembered in this browser.
+// (Phase 7.5) GameAudio is now the SOUND-EFFECT channel only (the speaker button: skating sound). Background music
+// has its own channel (MusicAudio below): its own gain straight to the speakers, its own button, slider and saved
+// volume — the two never change each other. Both use this one AudioContext (one per page, mobile-friendly).
 const GameAudio = (() => {
   let ctx = null, master = null, volume = 0.8, muted = false;
   try {
@@ -5723,8 +5741,206 @@ const GameAudio = (() => {
       return master;
     },
     get context() { return this.output && ctx; },
+    get hasContext() { return !!ctx; },                              // (7.5) without creating one
     resume() { if (ctx && ctx.state === 'suspended') ctx.resume(); },
   };
+})();
+
+// ---- (Phase 7.5) background music: its own channel ------------------------------------------------------
+// The files in music/ (real names below) play in a shuffled order: every track once, then a new shuffle (never the
+// same track twice in a row, also across shuffles), forever. Each track fades in (1.2 s) and fades out over its last
+// 1.2 s. Nothing plays until the player taps the Music button (browser autoplay rules are respected). A file that
+// fails to load is skipped; if none can be played the button says so — the game itself is never affected.
+// Chain: <audio> → fade gain (track fades / pause) → track levelling → music gain (the slider) → speakers.
+// The real files (checked in the repository, 2026-11-08). Their loudness differs a lot (measured EBU R128 integrated
+// loudness −24.8 … −11.5 LUFS), so each one gets a fixed gain to −18 LUFS: no track jumps out or fades away.
+// (Phase 7.5.1) audio diagnostics in the browser console: the full URL each file is asked from (relative to this page:
+// GitHub Pages → https://milly-lab.github.io/magical-winter-ice-rink/music/…), then whether it loaded, could not be
+// found / decoded, or was blocked by the autoplay rules. Normal steps: console.info; problems: console.warn ([Rink]).
+const audioUrl = (rel) => { try { return new URL(rel, location.href).href; } catch (e) { return rel; } };
+const audioInfo = (m) => { try { console.info('[Rink] ' + m); } catch (e) { /* ignore */ } };
+let audioHinted = false;
+const audioHint = () => {                           // once: the usual reason both folders fail together
+  if (audioHinted) return; audioHinted = true;
+  DIAG.log('audio: music/ and sound/ must sit next to index.html on the same web server (page: ' + location.href + ')');
+};
+const MUSIC_DIR = 'music/', MUSIC_FILES = [
+  ['track01-leberch-travel-piano.mp3', -15.8],                      // [file name, measured LUFS]
+  ['track02-leberch-piano.mp3', -18.7],
+  ['track03-leberch-nature-piano.mp3', -16.3],
+  ['track04-leberch-ever-piano-documentary.mp3', -24.8],
+  ['track05-leberch-inspiring-moment-inspiring-piano.mp3', -18.5],
+  ['track06-alex-morgan-calm-piano.mp3', -11.5],
+].map(([name, lufs]) => ({ name, gain: 10 ** ((-18 - lufs) / 20) }));
+const MusicAudio = (() => {
+  let volume = 0.5, muted = false;
+  try {
+    const s = JSON.parse(localStorage.getItem('rink.music') || 'null');
+    if (s && typeof s.volume === 'number') { volume = Math.min(1, Math.max(0, s.volume)); muted = !!s.muted; }
+  } catch (e) { /* storage unavailable: defaults */ }
+  const save = () => { try { localStorage.setItem('rink.music', JSON.stringify({ volume, muted })); } catch (e) { /* ignore */ } };
+  const XF = 1.2;                                   // s: fade in at the start / fade out at the end of a track
+  let el = null, fade = null, trim = null, gain = null, ctx = null;
+  let playing = false, started = false, unavailable = !MUSIC_FILES.length, failed = 0, cur = -1, last = -1, bag = [], ending = false, pauseT = 0;
+  const subs = new Set();
+  const notify = () => subs.forEach((fn) => fn());
+  const level = () => (muted ? 0 : volume);
+  const ramp = (g, v, sec) => { if (!g) return; const t = ctx.currentTime; g.gain.cancelScheduledValues(t); g.gain.setValueAtTime(g.gain.value, t); g.gain.linearRampToValueAtTime(v, t + sec); };
+  function nextIndex() {
+    const n = MUSIC_FILES.length;
+    if (!bag.length) {                              // a new shuffle of all tracks
+      bag = [...Array(n).keys()];
+      for (let i = n - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [bag[i], bag[j]] = [bag[j], bag[i]]; }
+      if (n > 1 && bag[0] === last) [bag[0], bag[1]] = [bag[1], bag[0]];
+    }
+    return bag.shift();
+  }
+  function ensure() {
+    if (el) return true;
+    try {
+      ctx = GameAudio.context;
+      el = new Audio(); el.preload = 'auto'; el.setAttribute('playsinline', '');
+      const src = ctx.createMediaElementSource(el);
+      fade = ctx.createGain(); fade.gain.value = 0;
+      trim = ctx.createGain();                       // the track's loudness levelling
+      gain = ctx.createGain(); gain.gain.value = level();
+      src.connect(fade); fade.connect(trim); trim.connect(gain); gain.connect(ctx.destination);
+    } catch (e) { DIAG.log('music: Web Audio connection failed: ' + (e && e.message)); el = null; unavailable = true; notify(); return false; }
+    el.addEventListener('canplay', () => audioInfo(`music: ready ${MUSIC_FILES[cur].name} (AudioContext ${ctx.state})`));
+    el.addEventListener('playing', () => { failed = 0; if (playing) ramp(fade, 1, XF); });
+    el.addEventListener('timeupdate', () => {     // the last 1.2 s of a track: fade out
+      if (!ending && playing && el.duration && el.duration - el.currentTime < XF) { ending = true; ramp(fade, 0, Math.max(0.2, el.duration - el.currentTime)); }
+    });
+    el.addEventListener('ended', () => { if (playing) load(nextIndex()); });
+    el.addEventListener('error', () => {           // missing / broken file: skip it (all failed → give up quietly)
+      const code = el.error ? ['', 'aborted', 'network error', 'cannot decode', 'not found / format not supported'][el.error.code] || el.error.code : '?';
+      DIAG.log(`music: cannot load ${audioUrl(el.getAttribute('src') || '')} (${code})`);
+      if (++failed >= MUSIC_FILES.length) { DIAG.log('music: no track could be loaded — music off'); audioHint(); playing = false; unavailable = true; notify(); return; }
+      if (playing) load(nextIndex());
+    });
+    return true;
+  }
+  function load(i) {
+    cur = last = i; ending = false;
+    ramp(fade, 0, 0.01);
+    trim.gain.setValueAtTime(MUSIC_FILES[i].gain, ctx.currentTime);
+    el.src = MUSIC_DIR + encodeURIComponent(MUSIC_FILES[i].name);    // (names may hold spaces / Korean)
+    audioInfo('music: loading ' + audioUrl(el.getAttribute('src')));
+    el.play().catch((e) => {                       // (a missing file is reported by the error event above)
+      if (e && e.name === 'NotAllowedError') DIAG.log('music: play() blocked by the browser autoplay rules — tap the Music button again');
+      else if (e && e.name !== 'AbortError' && e.name !== 'NotSupportedError') DIAG.log('music: play() failed: ' + e.name);
+    });
+  }
+  function play() {
+    if (unavailable || !ensure()) return;
+    clearTimeout(pauseT);
+    GameAudio.resume();
+    playing = true; started = true;
+    if (cur < 0) load(nextIndex());
+    else { el.play().catch(() => {}); ramp(fade, ending ? 0 : 1, 0.6); }
+    notify();
+  }
+  function pause() {
+    if (!el || !playing) return;
+    playing = false;
+    ramp(fade, 0, 0.4);
+    clearTimeout(pauseT); pauseT = setTimeout(() => { if (!playing) el.pause(); }, 450);
+    notify();
+  }
+  // the page goes to the background (phone: other app / locked): stop; back: carry on where it was
+  let hiddenWasPlaying = false;
+  document.addEventListener('visibilitychange', () => {
+    if (!el) return;
+    if (document.hidden) { hiddenWasPlaying = playing; if (playing) { playing = false; clearTimeout(pauseT); el.pause(); notify(); } }
+    else if (hiddenWasPlaying) { hiddenWasPlaying = false; play(); }
+  });
+  const changed = () => { if (gain) gain.gain.setTargetAtTime(level(), ctx.currentTime, 0.03); save(); notify(); };
+  return {
+    get volume() { return volume; },
+    get muted() { return muted; },
+    get level() { return level(); },
+    get playing() { return playing; },
+    get started() { return started; },
+    get unavailable() { return unavailable; },
+    get track() { return cur < 0 ? null : MUSIC_FILES[cur].name; },
+    setVolume(v) { volume = Math.min(1, Math.max(0, v)); if (volume > 0) muted = false; changed(); },
+    setMuted(m) { muted = !!m; changed(); },
+    play, pause, toggle() { if (playing) pause(); else play(); },
+    subscribe(fn) { subs.add(fn); return () => subs.delete(fn); },
+  };
+})();
+
+// ---- (Phase 7.5) skating sound: the blades on the ice, on the sound-effect channel ---------------------------
+// One looping buffer source for the whole session (decoded once, started once — no new audio objects per stroke),
+// through its own gain into GameAudio.output (the speaker slider). The gain follows how fast the player's own skater
+// actually travels ON the ice: ~0 standing / spinning in place, full while skating, silent in the air (jumps);
+// it eases in (≈0.25 s) and dies away (≈0.5 s) smoothly instead of switching. Starts after the first tap / key
+// (browser autoplay rules). If the file cannot be loaded nothing else changes.
+// sound/sound03-drive-over-border.mp3 (checked 2026-11-08): 6.79 s, 24 kHz stereo, a steady blade-on-ice texture
+// (≈ −20 dBFS RMS) that swells in over its first ~0.6 s and dies away over its last ~0.5 s. Looping the whole file
+// would dip every 6.8 s, so only the steady part 0.8–6.1 s is looped, and its end is cross-faded into its start
+// (0.3 s, equal power) once at load time → one seamless 5.0 s loop, no click, no level change at the seam.
+// Level: 15% while skating at the default effect volume (80%) → base 0.15 / 0.8.
+const SKATE_SOUND = { file: 'sound/' + encodeURIComponent('sound03-drive-over-border.mp3'), base: 0.15 / 0.8, loop: [0.8, 6.1], xfade: 0.3 };
+// a seamless loop buffer: [a, b) of `buf`, its last `x` seconds blended (equal power) into its first `x` seconds
+function makeSeamlessLoop(ctx, buf, a, b, x) {
+  const sr = buf.sampleRate, A = Math.round(a * sr), B = Math.min(buf.length, Math.round(b * sr)), X = Math.round(x * sr);
+  const n = B - A - X, out = ctx.createBuffer(buf.numberOfChannels, n, sr);
+  for (let c = 0; c < buf.numberOfChannels; c++) {
+    const src = buf.getChannelData(c), dst = out.getChannelData(c);
+    for (let i = 0; i < n; i++) dst[i] = src[A + i];
+    for (let i = 0; i < X; i++) {                    // start of the loop = its own start fading in + its tail fading out
+      const t = i / X;
+      dst[i] = src[A + i] * Math.sin(t * Math.PI / 2) + src[B - X + i] * Math.cos(t * Math.PI / 2);
+    }
+  }
+  return out;
+}
+const SkateSound = (() => {
+  let src = null, gain = null, ctx = null, state = 'idle', target = 0;
+  async function init() {
+    if (state !== 'idle') return;
+    state = 'loading';
+    try {
+      ctx = GameAudio.context;
+      const url = audioUrl(SKATE_SOUND.file);
+      const res = await fetch(SKATE_SOUND.file);
+      if (!res.ok) { if (res.status === 404) audioHint(); throw new Error('HTTP ' + res.status + ' ' + url); }
+      const data = await res.arrayBuffer();
+      const buf = await new Promise((ok, no) => { const p = ctx.decodeAudioData(data, ok, no); if (p && p.then) p.then(ok, no); })
+        .catch((e) => { throw new Error('cannot decode ' + url + ' (' + ((e && (e.name || e.message)) || 'decode error') + ')'); });
+      audioInfo(`skating sound: ready ${url} (${buf.duration.toFixed(2)} s, AudioContext ${ctx.state})`);
+      gain = ctx.createGain(); gain.gain.value = 0; gain.connect(GameAudio.output);
+      src = ctx.createBufferSource(); src.loop = true;
+      src.buffer = buf.duration > SKATE_SOUND.loop[1] ? makeSeamlessLoop(ctx, buf, SKATE_SOUND.loop[0], SKATE_SOUND.loop[1], SKATE_SOUND.xfade) : buf;
+      src.connect(gain); src.start();
+      state = 'ready';
+    } catch (e) { state = 'failed'; try { DIAG.log('skating sound: ' + (e && e.message)); } catch (e2) { /* ignore */ } }
+  }
+  // every frame: how loud the blades should be right now (0..1 of the base level)
+  function update(P) {
+    if (state !== 'ready' || !P) return;
+    const v = Math.hypot(P.velocity.x, P.velocity.z);
+    const onIce = P.mesh.position.y - P.bounds.iceY < 0.04;
+    const k = Math.min(1, Math.max(0, (v - 0.25) / 3.5)), w = k * k * (3 - 2 * k);
+    const want = onIce ? SKATE_SOUND.base * w : 0;
+    if (want === target || (want > 0 && Math.abs(want - target) < 0.002)) return;
+    gain.gain.setTargetAtTime(want, ctx.currentTime, want > target ? 0.08 : 0.16);   // ≈0.25 s in · ≈0.5 s out
+    target = want;
+  }
+  return { init, update, get state() { return state; }, get level() { return target; } };
+})();
+// the first tap / click / key anywhere wakes the audio (browsers only allow sound after a user gesture)
+(() => {
+  const wake = () => {
+    removeEventListener('pointerdown', wake, true); removeEventListener('keydown', wake, true); removeEventListener('touchend', wake, true);
+    try { GameAudio.output; GameAudio.resume(); SkateSound.init(); } catch (e) { /* no Web Audio: silent game */ }
+  };
+  addEventListener('pointerdown', wake, true); addEventListener('keydown', wake, true); addEventListener('touchend', wake, true);
+  // background tab / locked phone: let the audio clock sleep too (music pauses itself above)
+  document.addEventListener('visibilitychange', () => {
+    try { if (!GameAudio.hasContext) return; const c = GameAudio.context; if (document.hidden) c.suspend(); else c.resume(); } catch (e) { /* ignore */ }
+  });
 })();
 
 // ---- multiplayer rooms: NOT CONNECTED YET ---------------------------------------------------------------
@@ -5753,6 +5969,14 @@ const ROOM_SERVICE = {
 const HUD_ICONS = {
   chevron: '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 4.5l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   close: '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  // (Phase 7.5) music note: playing = full; paused = dimmer note + a small pause mark; muted (volume 0) = struck through
+  music: (st) => `<svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+      <g${st === 'play' ? '' : ' opacity=".6"'}><path d="M9 17.5V6.2l9-2v11.3"/><ellipse cx="6.9" cy="17.6" rx="2.2" ry="1.7"/><ellipse cx="15.9" cy="15.6" rx="2.2" ry="1.7"/>
+      ${st === 'play' ? '<path d="M9 9.4l9-2" />' : ''}</g>
+      ${st === 'mute' ? '<path d="M4 4l16 16"/>' : ''}${st === 'pause' ? '<path d="M18.6 17.3v4M21.4 17.3v4" stroke-width="1.7"/>' : ''}</svg>`,
+  playPause: (playing) => playing
+    ? '<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M4 2.5v9M10 2.5v9" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>'
+    : '<svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M4.2 2.4l7 4.6-7 4.6z" fill="currentColor"/></svg>',
   speaker: (level) => `<svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
       <path d="M4 9.5h3.2L12 5.5v13l-4.8-4H4z"/>
       ${level <= 0 ? '<path d="M16 9.5l5 5M21 9.5l-5 5"/>' : '<path d="M15.6 9.2a4 4 0 0 1 0 5.6"/>'}
@@ -5857,17 +6081,62 @@ function createTopHud({ toast } = {}) {
   vol.className = 'hud-vol';
   vol.innerHTML = `<button data-mute style="${[...btnReset, 'width:30px', 'height:30px', 'padding:0', 'display:flex', 'align-items:center',
       'justify-content:center', 'border:0', 'border-radius:50%', 'background:rgba(255,255,255,.08)', 'color:#f6f1e7'].join(';')}"></button>
-    <input data-slider type="range" min="0" max="100" step="1" aria-label="게임 볼륨"
+    <input data-slider type="range" min="0" max="100" step="1" aria-label="효과음 볼륨"
       style="width:min(150px, 38vw);accent-color:#f3d9b8;cursor:pointer;margin:0;touch-action:none">
     <span data-pct style="min-width:36px;text-align:right;font-size:13px;font-weight:600;letter-spacing:0"></span>`;
   volWrap.appendChild(spk); volWrap.appendChild(vol);
+  // (Phase 7.5) Music button right before the speaker: same round glass button, same panel style. The first tap starts
+  // the music (and opens the panel); the panel has play / pause + the music volume. The speaker now only sets the
+  // sound effects (skating); the two volumes are independent and both remembered in this browser.
+  const musWrap = css(document.createElement('div'), ['position:relative']);
+  const mus = css(document.createElement('button'), [...btnReset, HUD_GLASS, 'width:34px', 'height:34px', 'padding:0', 'display:flex',
+    'align-items:center', 'justify-content:center', 'border-radius:50%']);
+  mus.className = 'hud-btn';
+  mus.setAttribute('aria-haspopup', 'true');
+  mus.setAttribute('aria-expanded', 'false');
+  const mvol = css(document.createElement('div'), [HUD_GLASS, 'position:absolute', 'top:48px', 'right:0', 'display:none', 'align-items:center',
+    'gap:10px', 'padding:10px 14px 10px 10px', 'border-radius:16px', 'background:rgba(10,16,30,.78)', 'white-space:nowrap']);
+  mvol.className = 'hud-vol';
+  mvol.innerHTML = `<button data-pp style="${[...btnReset, 'width:30px', 'height:30px', 'padding:0', 'display:flex', 'align-items:center',
+      'justify-content:center', 'border:0', 'border-radius:50%', 'background:rgba(255,255,255,.08)', 'color:#f6f1e7'].join(';')}"></button>
+    <input data-slider type="range" min="0" max="100" step="1" aria-label="배경음악 볼륨"
+      style="width:min(150px, 38vw);accent-color:#f3d9b8;cursor:pointer;margin:0;touch-action:none">
+    <span data-pct style="min-width:36px;text-align:right;font-size:13px;font-weight:600;letter-spacing:0"></span>`;
+  musWrap.appendChild(mus); musWrap.appendChild(mvol);
+  right.appendChild(musWrap);
   right.appendChild(volWrap);
+  const mslider = mvol.querySelector('[data-slider]'), mpct = mvol.querySelector('[data-pct]'), mpp = mvol.querySelector('[data-pp]');
+  const renderMusic = () => {
+    const M = MusicAudio, p = Math.round(M.volume * 100);
+    const st = M.level <= 0 ? 'mute' : M.playing ? 'play' : 'pause';
+    mus.innerHTML = HUD_ICONS.music(st);
+    mus.setAttribute('aria-label', `배경음악 ${M.unavailable ? '재생할 수 없음' : M.playing ? '재생 중' : '일시정지'} · ${M.muted ? '음소거' : p + '%'} · 조절 열기`);
+    mpp.innerHTML = HUD_ICONS.playPause(M.playing);
+    mpp.setAttribute('aria-label', M.playing ? '배경음악 일시정지' : '배경음악 재생');
+    mpp.disabled = M.unavailable; mpp.style.opacity = M.unavailable ? '.4' : '1';
+    if (document.activeElement !== mslider) mslider.value = String(M.muted ? 0 : p);
+    mpct.textContent = M.unavailable ? '없음' : M.muted || p === 0 ? '음소거' : `${p}%`;
+  };
+  MusicAudio.subscribe(renderMusic);
+  renderMusic();
+  const musOpen = () => mvol.style.display !== 'none';
+  const setMusOpen = (o) => { mvol.style.display = o ? 'flex' : 'none'; mus.setAttribute('aria-expanded', String(o)); };
+  mus.addEventListener('click', () => {
+    const o = !musOpen();
+    setMusOpen(o); if (o) setVolOpen(false);
+    if (!MusicAudio.started) { MusicAudio.play(); if (MusicAudio.unavailable && toast) toast('배경음악을 불러오지 못했어요.', 2.5); }
+    mus.blur();
+  });
+  mpp.addEventListener('click', () => { MusicAudio.toggle(); });
+  mslider.addEventListener('input', () => { MusicAudio.setVolume(Number(mslider.value) / 100); });
+  mvol.addEventListener('keydown', (e) => e.stopPropagation());
+  mvol.addEventListener('keyup', (e) => e.stopPropagation());
   const slider = vol.querySelector('[data-slider]'), pct = vol.querySelector('[data-pct]'), mute = vol.querySelector('[data-mute]');
   const renderVol = () => {
     const lv = GameAudio.level, p = Math.round(GameAudio.volume * 100);
     spk.innerHTML = HUD_ICONS.speaker(lv);
     mute.innerHTML = HUD_ICONS.speaker(lv);
-    spk.setAttribute('aria-label', `볼륨 ${GameAudio.muted ? '음소거' : p + '%'} · 조절 열기`);
+    spk.setAttribute('aria-label', `효과음 볼륨 ${GameAudio.muted ? '음소거' : p + '%'} · 조절 열기`);
     mute.setAttribute('aria-label', GameAudio.muted ? '소리 켜기' : '음소거');
     if (document.activeElement !== slider) slider.value = String(GameAudio.muted ? 0 : p);
     pct.textContent = GameAudio.muted ? '음소거' : `${p}%`;
@@ -5876,7 +6145,7 @@ function createTopHud({ toast } = {}) {
   renderVol();
   const volOpen = () => vol.style.display !== 'none';
   const setVolOpen = (o) => { vol.style.display = o ? 'flex' : 'none'; spk.setAttribute('aria-expanded', String(o)); };
-  spk.addEventListener('click', () => { setVolOpen(!volOpen()); GameAudio.resume(); spk.blur(); });
+  spk.addEventListener('click', () => { const o = !volOpen(); setVolOpen(o); if (o) setMusOpen(false); GameAudio.resume(); spk.blur(); });
   slider.addEventListener('input', () => { GameAudio.setVolume(Number(slider.value) / 100); GameAudio.resume(); });
   mute.addEventListener('click', () => {
     if (GameAudio.muted || GameAudio.volume === 0) { if (GameAudio.volume === 0) GameAudio.setVolume(0.5); else GameAudio.setMuted(false); }
@@ -5890,16 +6159,17 @@ function createTopHud({ toast } = {}) {
   addEventListener('pointerdown', (e) => {
     if (isOpen() && !left.contains(e.target)) setOpen(false);
     if (volOpen() && !volWrap.contains(e.target)) setVolOpen(false);
+    if (musOpen() && !musWrap.contains(e.target)) setMusOpen(false);
   }, true);
   addEventListener('keydown', (e) => {
-    if (e.code !== 'Escape' || !(isOpen() || volOpen())) return;
-    setOpen(false); setVolOpen(false);
+    if (e.code !== 'Escape' || !(isOpen() || volOpen() || musOpen())) return;
+    setOpen(false); setVolOpen(false); setMusOpen(false);
     e.stopImmediatePropagation();
   }, true);
 
   document.body.appendChild(left);
   document.body.appendChild(right);
-  return { left, right, isServerOpen: isOpen, isVolumeOpen: volOpen };
+  return { left, right, isServerOpen: isOpen, isVolumeOpen: () => volOpen() || musOpen() };
 }
 
 // ===== fx/celebration.js =====
@@ -6345,8 +6615,22 @@ const RINK_LINK = (() => {
       return b;
     }));
     el.classList.add('ld-msg');
+    keepFlake();
   }
-  function loadingAgain() { if (el) el.classList.remove('ld-msg'); }
+  // (Phase 7.5) the message is taller than the three loading lines; without this the whole block re-centres and the
+  // snowflake jumps up. The panel takes only the loading lines' height in the layout (its extra height hangs below), so
+  // the snowflake and the first text line stay exactly where they are on the loading screen.
+  let titleH = 0;
+  function keepFlake() {
+    if (!el || !el.classList.contains('ld-msg')) return;
+    const t = el.querySelector('.ld-title'), p = el.querySelector('.ld-panel');
+    if (t.offsetHeight) titleH = t.offsetHeight;
+    if (!titleH) { el.classList.remove('ld-msg'); titleH = t.offsetHeight; el.classList.add('ld-msg'); }
+    p.style.marginBottom = '0px';
+    p.style.marginBottom = `${Math.min(0, titleH - p.offsetHeight)}px`;
+  }
+  addEventListener('resize', keepFlake);
+  function loadingAgain() { if (el) { el.classList.remove('ld-msg'); el.querySelector('.ld-panel').style.marginBottom = ''; } }
   // close the loading screen once the rink has drawn its first frame (it keeps rendering underneath meanwhile)
   function closeWhenReady() {
     if (!el || el.dataset.closing) return;
@@ -8075,6 +8359,7 @@ renderer.setAnimationLoop((now) => {
   const t = (now - start) / 1000;
   updateFps(realDt);
   simulate(realDt, t);
+  SkateSound.update(player);                                       // (Phase 7.5) blades on the ice: loudness follows his speed
   renderFrame(Math.min(realDt, MAX_CATCH_UP));
 });
 
